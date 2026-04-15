@@ -1,5 +1,6 @@
 #include "executor.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,32 +10,70 @@
 #include "schema.h"
 #include "storage.h"
 
-static int execute_insert(const char *db_dir, const InsertStatement *stmt,
+typedef struct {
+    const TableSchema *schema;
+    const SelectStatement *stmt;
+    QueryResult *result;
+    int where_index;
+} SelectFullScanState;
+
+static int execute_insert(ExecutionContext *ctx, const InsertStatement *stmt,
                           ExecResult *out_result,
                           char *errbuf, size_t errbuf_size);
-static int execute_select(const char *db_dir, const SelectStatement *stmt,
+static int execute_select(ExecutionContext *ctx, const SelectStatement *stmt,
                           ExecResult *out_result,
                           char *errbuf, size_t errbuf_size);
-static int build_insert_row(const TableSchema *schema, const InsertStatement *stmt,
-                            Row *out_row,
-                            char *errbuf, size_t errbuf_size);
-static int ensure_unique_id_value(const char *db_dir, const TableSchema *schema,
-                                  const char *table_name, const Row *row,
-                                  char *errbuf, size_t errbuf_size);
+static int build_insert_row_existing_behavior(const TableSchema *schema, const InsertStatement *stmt,
+                                              Row *out_row,
+                                              char *errbuf, size_t errbuf_size);
+static int validate_insert_columns_for_auto_id(const TableRuntime *table,
+                                               const InsertStatement *stmt,
+                                               char *errbuf, size_t errbuf_size);
+static int build_insert_row_with_generated_id(const TableRuntime *table,
+                                              const InsertStatement *stmt,
+                                              uint64_t generated_id,
+                                              Row *out_row,
+                                              char *errbuf, size_t errbuf_size);
 static int validate_select_columns(const TableSchema *schema, const SelectStatement *stmt,
                                    char *errbuf, size_t errbuf_size);
-static int project_rows_for_select(const TableSchema *schema, const SelectStatement *stmt,
-                                   const Row *all_rows, size_t all_row_count,
-                                   QueryResult *out_result,
-                                   char *errbuf, size_t errbuf_size);
+static int can_use_id_index(const TableRuntime *table, const SelectStatement *stmt, uint64_t *out_id_key);
+static int execute_select_with_id_index(ExecutionContext *ctx,
+                                        TableRuntime *table,
+                                        const SelectStatement *stmt,
+                                        uint64_t id_key,
+                                        ExecResult *out_result,
+                                        char *errbuf, size_t errbuf_size);
+static int execute_select_with_full_scan(ExecutionContext *ctx,
+                                         TableRuntime *table,
+                                         const SelectStatement *stmt,
+                                         ExecResult *out_result,
+                                         char *errbuf, size_t errbuf_size);
+static int project_single_row(const TableSchema *schema,
+                              const SelectStatement *stmt,
+                              const Row *source_row,
+                              Row *out_projected,
+                              char *errbuf, size_t errbuf_size);
+static int append_result_row(QueryResult *result,
+                             const Row *projected_row,
+                             char *errbuf, size_t errbuf_size);
 static int row_matches_where_clause(const SelectStatement *stmt, int where_index, const Row *row);
+static int initialize_query_result_columns(const TableSchema *schema,
+                                           const SelectStatement *stmt,
+                                           QueryResult *out_result,
+                                           char *errbuf, size_t errbuf_size);
+static int copy_row(const Row *src, Row *dst);
 static char *dup_string(const char *src);
+static int select_full_scan_callback(const Row *row,
+                                     long row_offset,
+                                     void *user_data,
+                                     char *errbuf,
+                                     size_t errbuf_size);
 
 static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
 {
     va_list args;
 
-    if (errbuf == NULL || errbuf_size == 0) {
+    if (errbuf == NULL || errbuf_size == 0U) {
         return;
     }
 
@@ -53,7 +92,7 @@ static int translate_module_status(int raw_status, int mapped_status,
         return STATUS_OK;
     }
 
-    if (errbuf == NULL || errbuf_size == 0) {
+    if (errbuf == NULL || errbuf_size == 0U) {
         return mapped_status;
     }
 
@@ -83,30 +122,43 @@ static char *dup_string(const char *src)
     }
 
     length = strlen(src);
-    copy = (char *)malloc(length + 1);
+    copy = (char *)malloc(length + 1U);
     if (copy == NULL) {
         return NULL;
     }
 
-    memcpy(copy, src, length + 1);
+    memcpy(copy, src, length + 1U);
     return copy;
 }
 
-static void free_row_contents(Row *row)
+static int copy_row(const Row *src, Row *dst)
 {
     size_t i;
 
-    if (row == NULL || row->values == NULL) {
-        return;
+    if (src == NULL || dst == NULL) {
+        return 1;
     }
 
-    for (i = 0; i < row->value_count; ++i) {
-        free(row->values[i]);
+    memset(dst, 0, sizeof(*dst));
+    if (src->value_count == 0U) {
+        return 0;
     }
 
-    free(row->values);
-    row->values = NULL;
-    row->value_count = 0;
+    dst->values = (char **)calloc(src->value_count, sizeof(char *));
+    if (dst->values == NULL) {
+        return 1;
+    }
+    dst->value_count = src->value_count;
+
+    for (i = 0U; i < src->value_count; ++i) {
+        dst->values[i] = dup_string(src->values[i]);
+        if (dst->values[i] == NULL) {
+            free_row(dst);
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void free_query_result_contents(QueryResult *query_result)
@@ -119,30 +171,30 @@ static void free_query_result_contents(QueryResult *query_result)
     }
 
     if (query_result->columns != NULL) {
-        for (column_index = 0; column_index < query_result->column_count; ++column_index) {
+        for (column_index = 0U; column_index < query_result->column_count; ++column_index) {
             free(query_result->columns[column_index]);
         }
         free(query_result->columns);
     }
 
     if (query_result->rows != NULL) {
-        for (row_index = 0; row_index < query_result->row_count; ++row_index) {
-            free_row_contents(&query_result->rows[row_index]);
+        for (row_index = 0U; row_index < query_result->row_count; ++row_index) {
+            free_row(&query_result->rows[row_index]);
         }
         free(query_result->rows);
     }
 
     query_result->columns = NULL;
-    query_result->column_count = 0;
+    query_result->column_count = 0U;
     query_result->rows = NULL;
-    query_result->row_count = 0;
+    query_result->row_count = 0U;
 }
 
-int execute_statement(const char *db_dir, const Statement *stmt,
+int execute_statement(ExecutionContext *ctx, const Statement *stmt,
                       ExecResult *out_result,
                       char *errbuf, size_t errbuf_size)
 {
-    if (db_dir == NULL || stmt == NULL || out_result == NULL) {
+    if (ctx == NULL || stmt == NULL || out_result == NULL) {
         set_error(errbuf, errbuf_size, "EXEC ERROR: invalid execute arguments");
         return STATUS_EXEC_ERROR;
     }
@@ -151,9 +203,9 @@ int execute_statement(const char *db_dir, const Statement *stmt,
 
     switch (stmt->type) {
         case STMT_INSERT:
-            return execute_insert(db_dir, &stmt->insert_stmt, out_result, errbuf, errbuf_size);
+            return execute_insert(ctx, &stmt->insert_stmt, out_result, errbuf, errbuf_size);
         case STMT_SELECT:
-            return execute_select(db_dir, &stmt->select_stmt, out_result, errbuf, errbuf_size);
+            return execute_select(ctx, &stmt->select_stmt, out_result, errbuf, errbuf_size);
         default:
             set_error(errbuf, errbuf_size, "EXEC ERROR: unsupported statement type");
             return STATUS_EXEC_ERROR;
@@ -167,97 +219,15 @@ void free_exec_result(ExecResult *result)
     }
 
     free_query_result_contents(&result->query_result);
-    result->affected_rows = 0;
+    result->affected_rows = 0U;
+    result->used_index = 0;
+    result->has_generated_id = 0;
+    result->generated_id = 0U;
 }
 
-static int execute_insert(const char *db_dir, const InsertStatement *stmt,
-                          ExecResult *out_result,
-                          char *errbuf, size_t errbuf_size)
-{
-    TableSchema schema = {0};
-    Row row = {0};
-    int status;
-
-    status = load_table_schema(db_dir, stmt->table_name, &schema, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        return translate_module_status(status, STATUS_SCHEMA_ERROR, "SCHEMA ERROR", errbuf, errbuf_size);
-    }
-
-    status = build_insert_row(&schema, stmt, &row, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        free_table_schema(&schema);
-        return status;
-    }
-
-    status = ensure_unique_id_value(db_dir, &schema, stmt->table_name, &row, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        free_row_contents(&row);
-        free_table_schema(&schema);
-        return status;
-    }
-
-    status = ensure_table_data_file(db_dir, stmt->table_name, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        free_row_contents(&row);
-        free_table_schema(&schema);
-        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
-    }
-
-    status = append_row_to_table(db_dir, stmt->table_name, &row, errbuf, errbuf_size);
-    free_row_contents(&row);
-    free_table_schema(&schema);
-    if (status != STATUS_OK) {
-        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
-    }
-
-    out_result->type = RESULT_INSERT;
-    out_result->affected_rows = 1;
-    return STATUS_OK;
-}
-
-static int execute_select(const char *db_dir, const SelectStatement *stmt,
-                          ExecResult *out_result,
-                          char *errbuf, size_t errbuf_size)
-{
-    TableSchema schema = {0};
-    Row *all_rows = NULL;
-    size_t all_row_count = 0;
-    int status;
-
-    status = load_table_schema(db_dir, stmt->table_name, &schema, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        return translate_module_status(status, STATUS_SCHEMA_ERROR, "SCHEMA ERROR", errbuf, errbuf_size);
-    }
-
-    status = validate_select_columns(&schema, stmt, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        free_table_schema(&schema);
-        return status;
-    }
-
-    status = read_all_rows_from_table(db_dir, stmt->table_name, schema.column_count,
-                                      &all_rows, &all_row_count, errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        free_table_schema(&schema);
-        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
-    }
-
-    status = project_rows_for_select(&schema, stmt, all_rows, all_row_count,
-                                     &out_result->query_result, errbuf, errbuf_size);
-    free_rows(all_rows, all_row_count);
-    free_table_schema(&schema);
-    if (status != STATUS_OK) {
-        return status;
-    }
-
-    out_result->type = RESULT_SELECT;
-    out_result->affected_rows = out_result->query_result.row_count;
-    return STATUS_OK;
-}
-
-static int build_insert_row(const TableSchema *schema, const InsertStatement *stmt,
-                            Row *out_row,
-                            char *errbuf, size_t errbuf_size)
+static int build_insert_row_existing_behavior(const TableSchema *schema, const InsertStatement *stmt,
+                                              Row *out_row,
+                                              char *errbuf, size_t errbuf_size)
 {
     size_t i;
     int *seen_columns;
@@ -267,7 +237,8 @@ static int build_insert_row(const TableSchema *schema, const InsertStatement *st
         return STATUS_EXEC_ERROR;
     }
 
-    if (stmt->column_count == 0) {
+    memset(out_row, 0, sizeof(*out_row));
+    if (stmt->column_count == 0U) {
         if (stmt->value_count != schema->column_count) {
             set_error(errbuf, errbuf_size,
                       "EXEC ERROR: expected %zu values but got %zu",
@@ -288,22 +259,22 @@ static int build_insert_row(const TableSchema *schema, const InsertStatement *st
     }
     out_row->value_count = schema->column_count;
 
-    for (i = 0; i < schema->column_count; ++i) {
+    for (i = 0U; i < schema->column_count; ++i) {
         out_row->values[i] = dup_string("");
         if (out_row->values[i] == NULL) {
             set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
-            free_row_contents(out_row);
+            free_row(out_row);
             return STATUS_EXEC_ERROR;
         }
     }
 
-    if (stmt->column_count == 0) {
-        for (i = 0; i < schema->column_count; ++i) {
+    if (stmt->column_count == 0U) {
+        for (i = 0U; i < schema->column_count; ++i) {
             free(out_row->values[i]);
             out_row->values[i] = dup_string(stmt->values[i].text);
             if (out_row->values[i] == NULL) {
                 set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
-                free_row_contents(out_row);
+                free_row(out_row);
                 return STATUS_EXEC_ERROR;
             }
         }
@@ -313,22 +284,23 @@ static int build_insert_row(const TableSchema *schema, const InsertStatement *st
     seen_columns = (int *)calloc(schema->column_count, sizeof(int));
     if (seen_columns == NULL) {
         set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
-        free_row_contents(out_row);
+        free_row(out_row);
         return STATUS_EXEC_ERROR;
     }
 
-    for (i = 0; i < stmt->column_count; ++i) {
+    for (i = 0U; i < stmt->column_count; ++i) {
         int column_index = schema_find_column_index(schema, stmt->columns[i]);
+
         if (column_index < 0) {
             set_error(errbuf, errbuf_size, "EXEC ERROR: unknown column '%s'", stmt->columns[i]);
             free(seen_columns);
-            free_row_contents(out_row);
+            free_row(out_row);
             return STATUS_EXEC_ERROR;
         }
         if (seen_columns[column_index] != 0) {
             set_error(errbuf, errbuf_size, "EXEC ERROR: duplicate column '%s'", stmt->columns[i]);
             free(seen_columns);
-            free_row_contents(out_row);
+            free_row(out_row);
             return STATUS_EXEC_ERROR;
         }
 
@@ -338,7 +310,7 @@ static int build_insert_row(const TableSchema *schema, const InsertStatement *st
         if (out_row->values[column_index] == NULL) {
             set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
             free(seen_columns);
-            free_row_contents(out_row);
+            free_row(out_row);
             return STATUS_EXEC_ERROR;
         }
     }
@@ -347,54 +319,150 @@ static int build_insert_row(const TableSchema *schema, const InsertStatement *st
     return STATUS_OK;
 }
 
-static int ensure_unique_id_value(const char *db_dir, const TableSchema *schema,
-                                  const char *table_name, const Row *row,
-                                  char *errbuf, size_t errbuf_size)
+static int validate_insert_columns_for_auto_id(const TableRuntime *table,
+                                               const InsertStatement *stmt,
+                                               char *errbuf, size_t errbuf_size)
 {
-    Row *existing_rows = NULL;
-    size_t existing_row_count = 0;
-    size_t row_index;
-    int id_index;
-    int status;
+    size_t i;
+    size_t non_id_column_count;
+    int *seen_columns;
 
-    if (db_dir == NULL || schema == NULL || table_name == NULL || row == NULL) {
-        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid id validation arguments");
+    if (table == NULL || stmt == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid auto-id insert arguments");
         return STATUS_EXEC_ERROR;
     }
 
-    id_index = schema_find_column_index(schema, "id");
-    if (id_index < 0) {
+    if (!table->has_id_column) {
         return STATUS_OK;
     }
 
-    if ((size_t)id_index >= row->value_count || row->values[id_index] == NULL || row->values[id_index][0] == '\0') {
-        set_error(errbuf, errbuf_size, "EXEC ERROR: column 'id' requires a non-empty value");
+    non_id_column_count = table->schema.column_count - 1U;
+    if (stmt->column_count == 0U) {
+        if (stmt->value_count != non_id_column_count) {
+            set_error(errbuf, errbuf_size,
+                      "EXEC ERROR: expected %zu values for auto-id insert but got %zu",
+                      non_id_column_count, stmt->value_count);
+            return STATUS_EXEC_ERROR;
+        }
+        return STATUS_OK;
+    }
+
+    if (stmt->column_count != stmt->value_count) {
+        set_error(errbuf, errbuf_size,
+                  "EXEC ERROR: column count %zu does not match value count %zu",
+                  stmt->column_count, stmt->value_count);
         return STATUS_EXEC_ERROR;
     }
 
-    status = read_all_rows_from_table(db_dir, table_name, schema->column_count,
-                                      &existing_rows, &existing_row_count,
-                                      errbuf, errbuf_size);
-    if (status != STATUS_OK) {
-        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
+    seen_columns = (int *)calloc(table->schema.column_count, sizeof(int));
+    if (seen_columns == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+        return STATUS_EXEC_ERROR;
     }
 
-    for (row_index = 0; row_index < existing_row_count; ++row_index) {
-        const char *existing_id = "";
+    for (i = 0U; i < stmt->column_count; ++i) {
+        int column_index = schema_find_column_index(&table->schema, stmt->columns[i]);
 
-        if ((size_t)id_index < existing_rows[row_index].value_count &&
-            existing_rows[row_index].values[id_index] != NULL) {
-            existing_id = existing_rows[row_index].values[id_index];
+        if (column_index < 0) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: unknown column '%s'", stmt->columns[i]);
+            free(seen_columns);
+            return STATUS_EXEC_ERROR;
+        }
+        if (column_index == table->id_column_index) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: explicit 'id' values are not allowed");
+            free(seen_columns);
+            return STATUS_EXEC_ERROR;
+        }
+        if (seen_columns[column_index] != 0) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: duplicate column '%s'", stmt->columns[i]);
+            free(seen_columns);
+            return STATUS_EXEC_ERROR;
         }
 
-        if (strcmp(existing_id, row->values[id_index]) == 0) {
-            set_error(errbuf, errbuf_size, "EXEC ERROR: duplicate id '%s'", row->values[id_index]);
-            free_rows(existing_rows, existing_row_count);
+        seen_columns[column_index] = 1;
+    }
+
+    free(seen_columns);
+    return STATUS_OK;
+}
+
+static int build_insert_row_with_generated_id(const TableRuntime *table,
+                                              const InsertStatement *stmt,
+                                              uint64_t generated_id,
+                                              Row *out_row,
+                                              char *errbuf, size_t errbuf_size)
+{
+    char id_buffer[32];
+    size_t i;
+    size_t value_index = 0U;
+
+    if (table == NULL || stmt == NULL || out_row == NULL || !table->has_id_column) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid generated-id row arguments");
+        return STATUS_EXEC_ERROR;
+    }
+
+    memset(out_row, 0, sizeof(*out_row));
+    out_row->values = (char **)calloc(table->schema.column_count, sizeof(char *));
+    if (out_row->values == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+        return STATUS_EXEC_ERROR;
+    }
+    out_row->value_count = table->schema.column_count;
+
+    for (i = 0U; i < table->schema.column_count; ++i) {
+        out_row->values[i] = dup_string("");
+        if (out_row->values[i] == NULL) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+            free_row(out_row);
             return STATUS_EXEC_ERROR;
         }
     }
 
-    free_rows(existing_rows, existing_row_count);
+    snprintf(id_buffer, sizeof(id_buffer), "%" PRIu64, generated_id);
+    free(out_row->values[table->id_column_index]);
+    out_row->values[table->id_column_index] = dup_string(id_buffer);
+    if (out_row->values[table->id_column_index] == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+        free_row(out_row);
+        return STATUS_EXEC_ERROR;
+    }
+
+    if (stmt->column_count == 0U) {
+        for (i = 0U; i < table->schema.column_count; ++i) {
+            if ((int)i == table->id_column_index) {
+                continue;
+            }
+
+            free(out_row->values[i]);
+            out_row->values[i] = dup_string(stmt->values[value_index].text);
+            if (out_row->values[i] == NULL) {
+                set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+                free_row(out_row);
+                return STATUS_EXEC_ERROR;
+            }
+            value_index += 1U;
+        }
+        return STATUS_OK;
+    }
+
+    for (i = 0U; i < stmt->column_count; ++i) {
+        int column_index = schema_find_column_index(&table->schema, stmt->columns[i]);
+
+        if (column_index < 0 || column_index == table->id_column_index) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: invalid auto-id insert column");
+            free_row(out_row);
+            return STATUS_EXEC_ERROR;
+        }
+
+        free(out_row->values[column_index]);
+        out_row->values[column_index] = dup_string(stmt->values[i].text);
+        if (out_row->values[column_index] == NULL) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+            free_row(out_row);
+            return STATUS_EXEC_ERROR;
+        }
+    }
+
     return STATUS_OK;
 }
 
@@ -408,13 +476,13 @@ static int validate_select_columns(const TableSchema *schema, const SelectStatem
         return STATUS_EXEC_ERROR;
     }
 
-    if (!stmt->select_all && stmt->column_count == 0) {
+    if (!stmt->select_all && stmt->column_count == 0U) {
         set_error(errbuf, errbuf_size, "EXEC ERROR: empty select column list");
         return STATUS_EXEC_ERROR;
     }
 
     if (!stmt->select_all) {
-        for (i = 0; i < stmt->column_count; ++i) {
+        for (i = 0U; i < stmt->column_count; ++i) {
             if (schema_find_column_index(schema, stmt->columns[i]) < 0) {
                 set_error(errbuf, errbuf_size, "EXEC ERROR: unknown column '%s'", stmt->columns[i]);
                 return STATUS_EXEC_ERROR;
@@ -426,6 +494,41 @@ static int validate_select_columns(const TableSchema *schema, const SelectStatem
         schema_find_column_index(schema, stmt->where_clause.column_name) < 0) {
         set_error(errbuf, errbuf_size, "EXEC ERROR: unknown column '%s'", stmt->where_clause.column_name);
         return STATUS_EXEC_ERROR;
+    }
+
+    return STATUS_OK;
+}
+
+static int initialize_query_result_columns(const TableSchema *schema,
+                                           const SelectStatement *stmt,
+                                           QueryResult *out_result,
+                                           char *errbuf, size_t errbuf_size)
+{
+    size_t i;
+    size_t column_count;
+
+    if (schema == NULL || stmt == NULL || out_result == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid query result initialization arguments");
+        return STATUS_EXEC_ERROR;
+    }
+
+    column_count = stmt->select_all ? schema->column_count : stmt->column_count;
+    out_result->columns = (char **)calloc(column_count, sizeof(char *));
+    if (column_count > 0U && out_result->columns == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+        return STATUS_EXEC_ERROR;
+    }
+
+    out_result->column_count = column_count;
+    for (i = 0U; i < column_count; ++i) {
+        const char *column_name = stmt->select_all ? schema->columns[i] : stmt->columns[i];
+
+        out_result->columns[i] = dup_string(column_name);
+        if (out_result->columns[i] == NULL) {
+            free_query_result_contents(out_result);
+            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+            return STATUS_EXEC_ERROR;
+        }
     }
 
     return STATUS_OK;
@@ -451,114 +554,343 @@ static int row_matches_where_clause(const SelectStatement *stmt, int where_index
     return strcmp(current_value, stmt->where_clause.value.text) == 0;
 }
 
-static int project_rows_for_select(const TableSchema *schema, const SelectStatement *stmt,
-                                   const Row *all_rows, size_t all_row_count,
-                                   QueryResult *out_result,
-                                   char *errbuf, size_t errbuf_size)
+static int project_single_row(const TableSchema *schema,
+                              const SelectStatement *stmt,
+                              const Row *source_row,
+                              Row *out_projected,
+                              char *errbuf, size_t errbuf_size)
 {
     size_t i;
-    size_t row_index;
-    size_t selected_count;
-    size_t matched_row_count;
-    int *selected_indexes = NULL;
-    int where_index = -1;
+    size_t column_count;
 
-    if (schema == NULL || stmt == NULL || out_result == NULL) {
-        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid projection arguments");
+    if (schema == NULL || stmt == NULL || source_row == NULL || out_projected == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid row projection arguments");
         return STATUS_EXEC_ERROR;
     }
 
-    selected_count = stmt->select_all ? schema->column_count : stmt->column_count;
-    out_result->columns = (char **)calloc(selected_count, sizeof(char *));
-    if (selected_count > 0 && out_result->columns == NULL) {
+    memset(out_projected, 0, sizeof(*out_projected));
+    column_count = stmt->select_all ? schema->column_count : stmt->column_count;
+    out_projected->values = (char **)calloc(column_count, sizeof(char *));
+    if (column_count > 0U && out_projected->values == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+        return STATUS_EXEC_ERROR;
+    }
+    out_projected->value_count = column_count;
+
+    for (i = 0U; i < column_count; ++i) {
+        int column_index = stmt->select_all ? (int)i : schema_find_column_index(schema, stmt->columns[i]);
+        const char *value = "";
+
+        if (column_index >= 0 && (size_t)column_index < source_row->value_count) {
+            value = source_row->values[column_index];
+        }
+
+        out_projected->values[i] = dup_string(value);
+        if (out_projected->values[i] == NULL) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+            free_row(out_projected);
+            return STATUS_EXEC_ERROR;
+        }
+    }
+
+    return STATUS_OK;
+}
+
+static int append_result_row(QueryResult *result,
+                             const Row *projected_row,
+                             char *errbuf, size_t errbuf_size)
+{
+    Row *grown_rows;
+
+    if (result == NULL || projected_row == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid result append arguments");
+        return STATUS_EXEC_ERROR;
+    }
+
+    grown_rows = (Row *)realloc(result->rows, (result->row_count + 1U) * sizeof(Row));
+    if (grown_rows == NULL) {
         set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
         return STATUS_EXEC_ERROR;
     }
 
-    selected_indexes = (int *)calloc(selected_count, sizeof(int));
-    if (selected_count > 0 && selected_indexes == NULL) {
-        free(out_result->columns);
-        out_result->columns = NULL;
+    result->rows = grown_rows;
+    if (copy_row(projected_row, &result->rows[result->row_count]) != 0) {
         set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
         return STATUS_EXEC_ERROR;
     }
 
-    for (i = 0; i < selected_count; ++i) {
-        const char *column_name;
+    result->row_count += 1U;
+    return STATUS_OK;
+}
 
-        if (stmt->select_all) {
-            selected_indexes[i] = (int)i;
-            column_name = schema->columns[i];
-        } else {
-            selected_indexes[i] = schema_find_column_index(schema, stmt->columns[i]);
-            column_name = stmt->columns[i];
+static int select_full_scan_callback(const Row *row,
+                                     long row_offset,
+                                     void *user_data,
+                                     char *errbuf,
+                                     size_t errbuf_size)
+{
+    SelectFullScanState *state = (SelectFullScanState *)user_data;
+    Row projected_row = {0};
+    int status;
+
+    (void)row_offset;
+
+    if (row == NULL || state == NULL) {
+        set_error(errbuf, errbuf_size, "EXEC ERROR: invalid select scan callback arguments");
+        return -1;
+    }
+
+    if (!row_matches_where_clause(state->stmt, state->where_index, row)) {
+        return 0;
+    }
+
+    status = project_single_row(state->schema, state->stmt, row, &projected_row, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        return -1;
+    }
+
+    status = append_result_row(state->result, &projected_row, errbuf, errbuf_size);
+    free_row(&projected_row);
+    if (status != STATUS_OK) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int can_use_id_index(const TableRuntime *table, const SelectStatement *stmt, uint64_t *out_id_key)
+{
+    if (out_id_key != NULL) {
+        *out_id_key = 0U;
+    }
+
+    if (table == NULL || stmt == NULL || out_id_key == NULL) {
+        return 0;
+    }
+
+    if (!table->has_id_column || !table->id_index_ready) {
+        return 0;
+    }
+
+    if (!stmt->where_clause.has_condition) {
+        return 0;
+    }
+
+    if (strcmp(stmt->where_clause.column_name, "id") != 0) {
+        return 0;
+    }
+
+    return try_parse_indexable_id_literal(&stmt->where_clause.value, out_id_key);
+}
+
+static int execute_select_with_id_index(ExecutionContext *ctx,
+                                        TableRuntime *table,
+                                        const SelectStatement *stmt,
+                                        uint64_t id_key,
+                                        ExecResult *out_result,
+                                        char *errbuf, size_t errbuf_size)
+{
+    Row source_row = {0};
+    Row projected_row = {0};
+    long row_offset = 0L;
+    int found = 0;
+    int status;
+
+    status = initialize_query_result_columns(&table->schema, stmt, &out_result->query_result, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        return status;
+    }
+
+    status = bptree_search(&table->id_index, id_key, &row_offset, &found, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        free_query_result_contents(&out_result->query_result);
+        return translate_module_status(status, STATUS_INDEX_ERROR, "INDEX ERROR", errbuf, errbuf_size);
+    }
+
+    out_result->used_index = 1;
+    if (!found) {
+        return STATUS_OK;
+    }
+
+    status = read_row_at_offset(ctx->db_dir, table->table_name, row_offset,
+                                table->schema.column_count, &source_row, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        free_query_result_contents(&out_result->query_result);
+        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
+    }
+
+    if (!row_matches_where_clause(stmt, table->id_column_index, &source_row)) {
+        free_row(&source_row);
+        return STATUS_OK;
+    }
+
+    status = project_single_row(&table->schema, stmt, &source_row, &projected_row, errbuf, errbuf_size);
+    free_row(&source_row);
+    if (status != STATUS_OK) {
+        free_query_result_contents(&out_result->query_result);
+        return status;
+    }
+
+    status = append_result_row(&out_result->query_result, &projected_row, errbuf, errbuf_size);
+    free_row(&projected_row);
+    if (status != STATUS_OK) {
+        free_query_result_contents(&out_result->query_result);
+        return status;
+    }
+
+    return STATUS_OK;
+}
+
+static int execute_select_with_full_scan(ExecutionContext *ctx,
+                                         TableRuntime *table,
+                                         const SelectStatement *stmt,
+                                         ExecResult *out_result,
+                                         char *errbuf, size_t errbuf_size)
+{
+    SelectFullScanState state;
+    int status;
+
+    status = initialize_query_result_columns(&table->schema, stmt, &out_result->query_result, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        return status;
+    }
+
+    state.schema = &table->schema;
+    state.stmt = stmt;
+    state.result = &out_result->query_result;
+    state.where_index = stmt->where_clause.has_condition
+        ? schema_find_column_index(&table->schema, stmt->where_clause.column_name)
+        : -1;
+
+    status = scan_table_rows_with_offsets(ctx->db_dir, table->table_name, table->schema.column_count,
+                                          select_full_scan_callback, &state,
+                                          errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        free_query_result_contents(&out_result->query_result);
+        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
+    }
+
+    out_result->used_index = 0;
+    return STATUS_OK;
+}
+
+static int execute_insert(ExecutionContext *ctx, const InsertStatement *stmt,
+                          ExecResult *out_result,
+                          char *errbuf, size_t errbuf_size)
+{
+    TableRuntime *table = NULL;
+    Row row = {0};
+    long row_offset = 0L;
+    int status;
+
+    status = get_or_load_table_runtime(ctx, stmt->table_name, &table, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        if (status == STATUS_SCHEMA_ERROR) {
+            return translate_module_status(status, STATUS_SCHEMA_ERROR, "SCHEMA ERROR", errbuf, errbuf_size);
+        }
+        if (status == STATUS_STORAGE_ERROR) {
+            return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
+        }
+        if (status == STATUS_INDEX_ERROR) {
+            return translate_module_status(status, STATUS_INDEX_ERROR, "INDEX ERROR", errbuf, errbuf_size);
+        }
+        return status;
+    }
+
+    if (table->has_id_column) {
+        uint64_t generated_id;
+
+        status = validate_insert_columns_for_auto_id(table, stmt, errbuf, errbuf_size);
+        if (status != STATUS_OK) {
+            return status;
         }
 
-        out_result->columns[i] = dup_string(column_name);
-        if (out_result->columns[i] == NULL) {
-            free(selected_indexes);
-            free_query_result_contents(out_result);
-            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
+        generated_id = table->next_id;
+        if (generated_id == 0U) {
+            set_error(errbuf, errbuf_size, "EXEC ERROR: auto-generated id overflow");
             return STATUS_EXEC_ERROR;
         }
-    }
-    out_result->column_count = selected_count;
 
-    if (stmt->where_clause.has_condition) {
-        where_index = schema_find_column_index(schema, stmt->where_clause.column_name);
-    }
-
-    if (all_row_count > 0) {
-        out_result->rows = (Row *)calloc(all_row_count, sizeof(Row));
-        if (out_result->rows == NULL) {
-            free(selected_indexes);
-            free_query_result_contents(out_result);
-            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
-            return STATUS_EXEC_ERROR;
-        }
-    }
-
-    matched_row_count = 0;
-    for (row_index = 0; row_index < all_row_count; ++row_index) {
-        size_t output_row_index;
-
-        if (!row_matches_where_clause(stmt, where_index, &all_rows[row_index])) {
-            continue;
+        status = build_insert_row_with_generated_id(table, stmt, generated_id, &row, errbuf, errbuf_size);
+        if (status != STATUS_OK) {
+            return status;
         }
 
-        output_row_index = matched_row_count;
-        out_result->rows[output_row_index].values = (char **)calloc(selected_count, sizeof(char *));
-        if (selected_count > 0 && out_result->rows[output_row_index].values == NULL) {
-            free(selected_indexes);
-            out_result->row_count = matched_row_count;
-            free_query_result_contents(out_result);
-            set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
-            return STATUS_EXEC_ERROR;
+        status = append_row_to_table_with_offset(ctx->db_dir, stmt->table_name, &row, &row_offset, errbuf, errbuf_size);
+        if (status != STATUS_OK) {
+            free_row(&row);
+            return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
         }
 
-        out_result->rows[output_row_index].value_count = selected_count;
-        for (i = 0; i < selected_count; ++i) {
-            const char *value = "";
-
-            if (selected_indexes[i] >= 0 &&
-                (size_t)selected_indexes[i] < all_rows[row_index].value_count) {
-                value = all_rows[row_index].values[selected_indexes[i]];
-            }
-
-            out_result->rows[output_row_index].values[i] = dup_string(value);
-            if (out_result->rows[output_row_index].values[i] == NULL) {
-                free(selected_indexes);
-                out_result->row_count = matched_row_count + 1U;
-                free_query_result_contents(out_result);
-                set_error(errbuf, errbuf_size, "EXEC ERROR: out of memory");
-                return STATUS_EXEC_ERROR;
-            }
+        status = bptree_insert(&table->id_index, generated_id, row_offset, errbuf, errbuf_size);
+        free_row(&row);
+        if (status != STATUS_OK) {
+            return translate_module_status(status, STATUS_INDEX_ERROR, "INDEX ERROR", errbuf, errbuf_size);
         }
 
-        matched_row_count += 1U;
+        table->next_id += 1U;
+        table->id_index_ready = 1;
+        out_result->type = RESULT_INSERT;
+        out_result->affected_rows = 1U;
+        out_result->has_generated_id = 1;
+        out_result->generated_id = generated_id;
+        return STATUS_OK;
     }
 
-    out_result->row_count = matched_row_count;
-    free(selected_indexes);
+    status = build_insert_row_existing_behavior(&table->schema, stmt, &row, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        return status;
+    }
+
+    status = append_row_to_table(ctx->db_dir, stmt->table_name, &row, errbuf, errbuf_size);
+    free_row(&row);
+    if (status != STATUS_OK) {
+        return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
+    }
+
+    out_result->type = RESULT_INSERT;
+    out_result->affected_rows = 1U;
+    return STATUS_OK;
+}
+
+static int execute_select(ExecutionContext *ctx, const SelectStatement *stmt,
+                          ExecResult *out_result,
+                          char *errbuf, size_t errbuf_size)
+{
+    TableRuntime *table = NULL;
+    uint64_t id_key = 0U;
+    int status;
+
+    status = get_or_load_table_runtime(ctx, stmt->table_name, &table, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        if (status == STATUS_SCHEMA_ERROR) {
+            return translate_module_status(status, STATUS_SCHEMA_ERROR, "SCHEMA ERROR", errbuf, errbuf_size);
+        }
+        if (status == STATUS_STORAGE_ERROR) {
+            return translate_module_status(status, STATUS_STORAGE_ERROR, "STORAGE ERROR", errbuf, errbuf_size);
+        }
+        if (status == STATUS_INDEX_ERROR) {
+            return translate_module_status(status, STATUS_INDEX_ERROR, "INDEX ERROR", errbuf, errbuf_size);
+        }
+        return status;
+    }
+
+    status = validate_select_columns(&table->schema, stmt, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        return status;
+    }
+
+    if (can_use_id_index(table, stmt, &id_key)) {
+        status = execute_select_with_id_index(ctx, table, stmt, id_key, out_result, errbuf, errbuf_size);
+    } else {
+        status = execute_select_with_full_scan(ctx, table, stmt, out_result, errbuf, errbuf_size);
+    }
+
+    if (status != STATUS_OK) {
+        return status;
+    }
+
+    out_result->type = RESULT_SELECT;
+    out_result->affected_rows = out_result->query_result.row_count;
     return STATUS_OK;
 }

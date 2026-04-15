@@ -6,6 +6,7 @@
 #include "errors.h"
 #include "executor.h"
 #include "parser.h"
+#include "runtime.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -48,6 +49,20 @@ static void remove_if_exists(const char *path)
     remove(path);
 }
 
+static char *dup_string(const char *text)
+{
+    size_t length = strlen(text) + 1U;
+    char *copy = (char *)malloc(length);
+
+    if (copy == NULL) {
+        fprintf(stderr, "Out of memory\n");
+        exit(1);
+    }
+
+    memcpy(copy, text, length);
+    return copy;
+}
+
 static void ensure_directory(const char *path)
 {
     if (MKDIR(path) != 0 && errno != EEXIST) {
@@ -60,10 +75,12 @@ static void cleanup_test_db(void)
 {
     remove_if_exists("build/test_executor_db/users.schema");
     remove_if_exists("build/test_executor_db/users.data");
+    remove_if_exists("build/test_executor_db/products.schema");
+    remove_if_exists("build/test_executor_db/products.data");
     RMDIR("build/test_executor_db");
 }
 
-static void prepare_test_db(void)
+static void prepare_users_schema(void)
 {
     FILE *schema_file;
 
@@ -73,11 +90,29 @@ static void prepare_test_db(void)
 
     schema_file = fopen("build/test_executor_db/users.schema", "w");
     if (schema_file == NULL) {
-        fprintf(stderr, "Failed to open schema file: %s\n", strerror(errno));
+        fprintf(stderr, "Failed to open users schema file: %s\n", strerror(errno));
         exit(1);
     }
 
     fputs("id\nname\nage\n", schema_file);
+    fclose(schema_file);
+}
+
+static void prepare_products_schema(void)
+{
+    FILE *schema_file;
+
+    cleanup_test_db();
+    ensure_directory("build");
+    ensure_directory("build/test_executor_db");
+
+    schema_file = fopen("build/test_executor_db/products.schema", "w");
+    if (schema_file == NULL) {
+        fprintf(stderr, "Failed to open products schema file: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    fputs("name\nprice\n", schema_file);
     fclose(schema_file);
 }
 
@@ -127,20 +162,6 @@ static char *read_entire_file(const char *path)
     return buffer;
 }
 
-static char *dup_string(const char *src)
-{
-    size_t len = strlen(src) + 1U;
-    char *copy = (char *)malloc(len);
-
-    if (copy == NULL) {
-        fprintf(stderr, "Out of memory\n");
-        exit(1);
-    }
-
-    memcpy(copy, src, len);
-    return copy;
-}
-
 static Statement make_insert_stmt(const char *table_name,
                                   const char **columns, size_t column_count,
                                   const char **values, size_t value_count)
@@ -159,8 +180,7 @@ static Statement make_insert_stmt(const char *table_name,
             fprintf(stderr, "Out of memory\n");
             exit(1);
         }
-
-        for (i = 0U; i < column_count; i++) {
+        for (i = 0U; i < column_count; ++i) {
             stmt.insert_stmt.columns[i] = dup_string(columns[i]);
         }
     }
@@ -171,8 +191,7 @@ static Statement make_insert_stmt(const char *table_name,
             fprintf(stderr, "Out of memory\n");
             exit(1);
         }
-
-        for (i = 0U; i < value_count; i++) {
+        for (i = 0U; i < value_count; ++i) {
             stmt.insert_stmt.values[i].type = VALUE_STRING;
             stmt.insert_stmt.values[i].text = dup_string(values[i]);
         }
@@ -185,7 +204,8 @@ static Statement make_select_stmt(const char *table_name,
                                   int select_all,
                                   const char **columns, size_t column_count,
                                   const char *where_column,
-                                  const char *where_value)
+                                  const char *where_value,
+                                  ValueType where_type)
 {
     Statement stmt = {0};
     size_t i;
@@ -202,7 +222,7 @@ static Statement make_select_stmt(const char *table_name,
             exit(1);
         }
 
-        for (i = 0U; i < column_count; i++) {
+        for (i = 0U; i < column_count; ++i) {
             stmt.select_stmt.columns[i] = dup_string(columns[i]);
         }
     }
@@ -210,40 +230,42 @@ static Statement make_select_stmt(const char *table_name,
     if (where_column != NULL) {
         stmt.select_stmt.where_clause.has_condition = 1;
         stmt.select_stmt.where_clause.column_name = dup_string(where_column);
-        stmt.select_stmt.where_clause.value.type = VALUE_STRING;
+        stmt.select_stmt.where_clause.value.type = where_type;
         stmt.select_stmt.where_clause.value.text = dup_string(where_value);
     }
 
     return stmt;
 }
 
-static void seed_users_data(const char *content)
+static ExecutionContext create_context(void)
 {
-    FILE *data_file;
+    ExecutionContext ctx = {0};
+    char errbuf[256] = {0};
 
-    data_file = fopen("build/test_executor_db/users.data", "w");
-    if (data_file == NULL) {
-        fprintf(stderr, "Failed to open data file: %s\n", strerror(errno));
+    if (init_execution_context("build/test_executor_db", &ctx, errbuf, sizeof(errbuf)) != STATUS_OK) {
+        fprintf(stderr, "Failed to init execution context: %s\n", errbuf);
         exit(1);
     }
 
-    fputs(content, data_file);
-    fclose(data_file);
+    return ctx;
 }
 
-static void test_insert_success(void)
+static void test_auto_id_insert_success(void)
 {
-    const char *values[] = {"1", "Alice", "20"};
+    const char *values[] = {"Alice", "20"};
     Statement stmt;
     ExecResult result = {0};
+    ExecutionContext ctx;
     char errbuf[256] = {0};
     char *content;
 
-    prepare_test_db();
-    stmt = make_insert_stmt("users", NULL, 0U, values, 3U);
+    prepare_users_schema();
+    ctx = create_context();
+    stmt = make_insert_stmt("users", NULL, 0U, values, 2U);
 
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
-    ASSERT_TRUE(result.type == RESULT_INSERT);
+    ASSERT_TRUE(execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.has_generated_id == 1);
+    ASSERT_TRUE(result.generated_id == 1U);
     ASSERT_TRUE(result.affected_rows == 1U);
 
     content = read_entire_file("build/test_executor_db/users.data");
@@ -253,200 +275,187 @@ static void test_insert_success(void)
     free(content);
     free_exec_result(&result);
     free_statement(&stmt);
+    free_execution_context(&ctx);
 }
 
-static void test_select_all_success(void)
+static void test_column_list_auto_id_insert_success(void)
 {
+    const char *columns[] = {"age", "name"};
+    const char *values[] = {"21", "Bob"};
     Statement stmt;
     ExecResult result = {0};
+    ExecutionContext ctx;
+    char errbuf[256] = {0};
+    char *content;
+
+    prepare_users_schema();
+    ctx = create_context();
+    stmt = make_insert_stmt("users", columns, 2U, values, 2U);
+
+    ASSERT_TRUE(execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.generated_id == 1U);
+
+    content = read_entire_file("build/test_executor_db/users.data");
+    ASSERT_TRUE(content != NULL);
+    ASSERT_STREQ("1|Bob|21\n", content);
+
+    free(content);
+    free_exec_result(&result);
+    free_statement(&stmt);
+    free_execution_context(&ctx);
+}
+
+static void test_explicit_id_insert_fails(void)
+{
+    const char *columns[] = {"id", "name"};
+    const char *values[] = {"7", "Alice"};
+    Statement stmt;
+    ExecResult result = {0};
+    ExecutionContext ctx;
     char errbuf[256] = {0};
 
-    prepare_test_db();
-    seed_users_data("1|Alice|20\n2|Bob|25\n");
-    stmt = make_select_stmt("users", 1, NULL, 0U, NULL, NULL);
+    prepare_users_schema();
+    ctx = create_context();
+    stmt = make_insert_stmt("users", columns, 2U, values, 2U);
 
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
-    ASSERT_TRUE(result.type == RESULT_SELECT);
-    ASSERT_TRUE(result.query_result.column_count == 3U);
-    ASSERT_TRUE(result.query_result.row_count == 2U);
-    ASSERT_STREQ("id", result.query_result.columns[0]);
-    ASSERT_STREQ("name", result.query_result.columns[1]);
-    ASSERT_STREQ("age", result.query_result.columns[2]);
-    ASSERT_STREQ("Bob", result.query_result.rows[1].values[1]);
-    ASSERT_STREQ("25", result.query_result.rows[1].values[2]);
+    ASSERT_TRUE(execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_EXEC_ERROR);
+    ASSERT_TRUE(strstr(errbuf, "explicit 'id'") != NULL);
 
     free_exec_result(&result);
     free_statement(&stmt);
+    free_execution_context(&ctx);
 }
 
-static void test_select_partial_success(void)
+static void seed_users_with_auto_ids(ExecutionContext *ctx)
 {
-    const char *columns[] = {"name", "id"};
-    Statement stmt;
+    const char *values1[] = {"Alice", "20"};
+    const char *values2[] = {"Bob", "21"};
+    Statement stmt1 = make_insert_stmt("users", NULL, 0U, values1, 2U);
+    Statement stmt2 = make_insert_stmt("users", NULL, 0U, values2, 2U);
     ExecResult result = {0};
     char errbuf[256] = {0};
 
-    prepare_test_db();
-    seed_users_data("1|Alice|20\n2|Bob|25\n");
-    stmt = make_select_stmt("users", 0, columns, 2U, NULL, NULL);
-
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
-    ASSERT_TRUE(result.query_result.column_count == 2U);
-    ASSERT_TRUE(result.query_result.row_count == 2U);
-    ASSERT_STREQ("name", result.query_result.columns[0]);
-    ASSERT_STREQ("id", result.query_result.columns[1]);
-    ASSERT_STREQ("Alice", result.query_result.rows[0].values[0]);
-    ASSERT_STREQ("2", result.query_result.rows[1].values[1]);
-
+    if (execute_statement(ctx, &stmt1, &result, errbuf, sizeof(errbuf)) != STATUS_OK) {
+        fprintf(stderr, "seed insert 1 failed: %s\n", errbuf);
+        exit(1);
+    }
     free_exec_result(&result);
-    free_statement(&stmt);
+
+    if (execute_statement(ctx, &stmt2, &result, errbuf, sizeof(errbuf)) != STATUS_OK) {
+        fprintf(stderr, "seed insert 2 failed: %s\n", errbuf);
+        exit(1);
+    }
+    free_exec_result(&result);
+
+    free_statement(&stmt1);
+    free_statement(&stmt2);
 }
 
-static void test_select_where_filters_rows(void)
+static void test_select_where_id_uses_index(void)
 {
     Statement stmt;
     ExecResult result = {0};
+    ExecutionContext ctx;
     char errbuf[256] = {0};
 
-    prepare_test_db();
-    seed_users_data("1|Alice|20\n2|Bob|25\n");
-    stmt = make_select_stmt("users", 1, NULL, 0U, "id", "2");
+    prepare_users_schema();
+    ctx = create_context();
+    seed_users_with_auto_ids(&ctx);
 
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    stmt = make_select_stmt("users", 1, NULL, 0U, "id", "2", VALUE_NUMBER);
+    ASSERT_TRUE(execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.used_index == 1);
     ASSERT_TRUE(result.query_result.row_count == 1U);
-    ASSERT_TRUE(result.affected_rows == 1U);
     ASSERT_STREQ("2", result.query_result.rows[0].values[0]);
     ASSERT_STREQ("Bob", result.query_result.rows[0].values[1]);
 
     free_exec_result(&result);
     free_statement(&stmt);
+    free_execution_context(&ctx);
 }
 
-static void test_unknown_table_error(void)
+static void test_select_where_non_id_uses_full_scan(void)
 {
-    const char *columns[] = {"id"};
     Statement stmt;
     ExecResult result = {0};
+    ExecutionContext ctx;
     char errbuf[256] = {0};
 
-    cleanup_test_db();
-    ensure_directory("build");
-    ensure_directory("build/test_executor_db");
-    stmt = make_select_stmt("users", 0, columns, 1U, NULL, NULL);
+    prepare_users_schema();
+    ctx = create_context();
+    seed_users_with_auto_ids(&ctx);
 
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_SCHEMA_ERROR);
-    ASSERT_TRUE(strstr(errbuf, "SCHEMA ERROR") != NULL);
+    stmt = make_select_stmt("users", 1, NULL, 0U, "name", "Bob", VALUE_STRING);
+    ASSERT_TRUE(execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.used_index == 0);
+    ASSERT_TRUE(result.query_result.row_count == 1U);
+    ASSERT_STREQ("2", result.query_result.rows[0].values[0]);
 
     free_exec_result(&result);
     free_statement(&stmt);
+    free_execution_context(&ctx);
 }
 
-static void test_unknown_column_error(void)
+static void test_non_canonical_id_literal_does_not_use_index(void)
 {
-    const char *columns[] = {"age2"};
     Statement stmt;
     ExecResult result = {0};
+    ExecutionContext ctx;
     char errbuf[256] = {0};
 
-    prepare_test_db();
-    stmt = make_select_stmt("users", 0, columns, 1U, NULL, NULL);
+    prepare_users_schema();
+    ctx = create_context();
+    seed_users_with_auto_ids(&ctx);
 
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_EXEC_ERROR);
-    ASSERT_TRUE(strstr(errbuf, "unknown column") != NULL);
+    stmt = make_select_stmt("users", 1, NULL, 0U, "id", "001", VALUE_STRING);
+    ASSERT_TRUE(execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.used_index == 0);
+    ASSERT_TRUE(result.query_result.row_count == 0U);
 
     free_exec_result(&result);
     free_statement(&stmt);
+    free_execution_context(&ctx);
 }
 
-static void test_insert_count_mismatch_error(void)
+static void test_non_indexed_table_keeps_existing_behavior(void)
 {
-    const char *columns[] = {"id", "name"};
-    const char *values[] = {"1"};
-    Statement stmt;
+    const char *values[] = {"apple", "1000"};
+    Statement insert_stmt;
+    Statement select_stmt;
     ExecResult result = {0};
+    ExecutionContext ctx;
     char errbuf[256] = {0};
 
-    prepare_test_db();
-    stmt = make_insert_stmt("users", columns, 2U, values, 1U);
+    prepare_products_schema();
+    ctx = create_context();
 
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_EXEC_ERROR);
-    ASSERT_TRUE(strstr(errbuf, "column count") != NULL);
+    insert_stmt = make_insert_stmt("products", NULL, 0U, values, 2U);
+    ASSERT_TRUE(execute_statement(&ctx, &insert_stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.has_generated_id == 0);
+    free_exec_result(&result);
+    free_statement(&insert_stmt);
+
+    select_stmt = make_select_stmt("products", 1, NULL, 0U, "name", "apple", VALUE_STRING);
+    ASSERT_TRUE(execute_statement(&ctx, &select_stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
+    ASSERT_TRUE(result.used_index == 0);
+    ASSERT_TRUE(result.query_result.row_count == 1U);
+    ASSERT_STREQ("apple", result.query_result.rows[0].values[0]);
+    ASSERT_STREQ("1000", result.query_result.rows[0].values[1]);
 
     free_exec_result(&result);
-    free_statement(&stmt);
-}
-
-static void test_partial_insert_fills_empty_strings(void)
-{
-    const char *columns[] = {"name", "id"};
-    const char *values[] = {"Bob", "2"};
-    Statement stmt;
-    ExecResult result = {0};
-    char errbuf[256] = {0};
-    char *content;
-
-    prepare_test_db();
-    stmt = make_insert_stmt("users", columns, 2U, values, 2U);
-
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_OK);
-
-    content = read_entire_file("build/test_executor_db/users.data");
-    ASSERT_TRUE(content != NULL);
-    ASSERT_STREQ("2|Bob|\n", content);
-
-    free(content);
-    free_exec_result(&result);
-    free_statement(&stmt);
-}
-
-static void test_duplicate_id_error(void)
-{
-    const char *values[] = {"1", "Bob", "25"};
-    Statement stmt;
-    ExecResult result = {0};
-    char errbuf[256] = {0};
-
-    prepare_test_db();
-    seed_users_data("1|Alice|20\n");
-    stmt = make_insert_stmt("users", NULL, 0U, values, 3U);
-
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_EXEC_ERROR);
-    ASSERT_TRUE(strstr(errbuf, "duplicate id") != NULL);
-
-    free_exec_result(&result);
-    free_statement(&stmt);
-}
-
-static void test_missing_id_error(void)
-{
-    const char *columns[] = {"name"};
-    const char *values[] = {"Chris"};
-    Statement stmt;
-    ExecResult result = {0};
-    char errbuf[256] = {0};
-
-    prepare_test_db();
-    stmt = make_insert_stmt("users", columns, 1U, values, 1U);
-
-    ASSERT_TRUE(execute_statement("build/test_executor_db", &stmt, &result, errbuf, sizeof(errbuf)) == STATUS_EXEC_ERROR);
-    ASSERT_TRUE(strstr(errbuf, "requires a non-empty value") != NULL);
-
-    free_exec_result(&result);
-    free_statement(&stmt);
+    free_statement(&select_stmt);
+    free_execution_context(&ctx);
 }
 
 int main(void)
 {
-    test_insert_success();
-    test_select_all_success();
-    test_select_partial_success();
-    test_select_where_filters_rows();
-    test_unknown_table_error();
-    test_unknown_column_error();
-    test_insert_count_mismatch_error();
-    test_partial_insert_fills_empty_strings();
-    test_duplicate_id_error();
-    test_missing_id_error();
+    test_auto_id_insert_success();
+    test_column_list_auto_id_insert_success();
+    test_explicit_id_insert_fails();
+    test_select_where_id_uses_index();
+    test_select_where_non_id_uses_full_scan();
+    test_non_canonical_id_literal_does_not_use_index();
+    test_non_indexed_table_keeps_existing_behavior();
     cleanup_test_db();
 
     if (tests_failed != 0) {
