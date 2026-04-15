@@ -1,0 +1,15 @@
+#ifndef ERRORS_H
+#define ERRORS_H
+
+typedef enum {
+    STATUS_OK = 0,
+    STATUS_INVALID_ARGS = 1,
+    STATUS_FILE_ERROR = 2,
+    STATUS_LEX_ERROR = 3,
+    STATUS_PARSE_ERROR = 4,
+    STATUS_SCHEMA_ERROR = 5,
+    STATUS_STORAGE_ERROR = 6,
+    STATUS_EXEC_ERROR = 7
+} StatusCode;
+
+#endif
