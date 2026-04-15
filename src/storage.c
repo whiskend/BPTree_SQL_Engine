@@ -8,11 +8,13 @@
 
 #include "errors.h"
 
+/* read_all_rows 경로에서 out_rows/out_row_count를 함께 넘기기 위한 내부 상태 구조체다. */
 typedef struct {
-    Row **rows;
-    size_t *row_count;
+    Row **rows;          /* 새로 누적할 Row 배열 포인터를 가리킨다. */
+    size_t *row_count;   /* 현재 누적된 row 개수를 가리킨다. */
 } ReadAllRowsState;
 
+/* storage 모듈 내부에서 서식 문자열 기반 에러 메시지를 errbuf에 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
 {
     va_list args;
@@ -26,6 +28,7 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
     va_end(args);
 }
 
+/* value를 heap 문자열로 복제해 반환하고 NULL이면 빈 문자열로 간주한다. */
 static char *dup_string(const char *value)
 {
     size_t length;
@@ -45,6 +48,7 @@ static char *dup_string(const char *value)
     return copy;
 }
 
+/* db_dir/table_name/suffix를 결합해 대상 데이터 파일 전체 경로를 만든다. */
 static char *build_table_path(const char *db_dir, const char *table_name, const char *suffix)
 {
     size_t db_len;
@@ -69,6 +73,7 @@ static char *build_table_path(const char *db_dir, const char *table_name, const 
     return path;
 }
 
+/* file에서 개행 전까지 한 줄을 읽어 out_line heap 문자열로 넘기고 상태를 반환한다. */
 static int read_line(FILE *file, char **out_line)
 {
     size_t capacity;
@@ -127,6 +132,7 @@ static int read_line(FILE *file, char **out_line)
     return 1;
 }
 
+/* buffer 동적 문자열 뒤에 문자 ch를 append하고 성공 여부를 0/1로 반환한다. */
 static int append_char(char **buffer, size_t *length, size_t *capacity, char ch)
 {
     if (*buffer == NULL) {
@@ -153,6 +159,7 @@ static int append_char(char **buffer, size_t *length, size_t *capacity, char ch)
     return 0;
 }
 
+/* field_value를 fields 동적 배열 끝에 추가하고 성공 여부를 0/1로 반환한다. */
 static int push_field(char ***fields, size_t *field_count, char *field_value)
 {
     char **grown;
@@ -168,6 +175,7 @@ static int push_field(char ***fields, size_t *field_count, char *field_value)
     return 0;
 }
 
+/* fields 배열과 그 안의 각 문자열 메모리를 모두 해제한다. */
 static void free_field_array(char **fields, size_t field_count)
 {
     size_t i;
@@ -182,6 +190,7 @@ static void free_field_array(char **fields, size_t field_count)
     free(fields);
 }
 
+/* field 개수를 expected_count에 맞게 자르거나 빈 문자열로 패딩한다. */
 static int normalize_field_count(char ***fields, size_t *field_count, size_t expected_count)
 {
     size_t current_count;
@@ -232,6 +241,7 @@ static int normalize_field_count(char ***fields, size_t *field_count, size_t exp
     return 0;
 }
 
+/* 값 문자열을 `\\`, `\|`, `\n` 규칙으로 escape한 새 문자열을 반환한다. */
 static char *escape_field(const char *value)
 {
     const char *src;
@@ -277,6 +287,7 @@ static char *escape_field(const char *value)
     return escaped;
 }
 
+/* 저장된 escape 시퀀스를 실제 문자로 복원한 새 문자열을 반환한다. */
 static char *unescape_field(const char *value)
 {
     size_t len;
@@ -323,6 +334,7 @@ static char *unescape_field(const char *value)
     return unescaped;
 }
 
+/* `|` 구분과 escape를 해석해 line 한 줄을 field 문자열 배열로 분해한다. */
 static int split_escaped_row(const char *line, char ***out_fields, size_t *out_count)
 {
     char **fields = NULL;
@@ -418,6 +430,7 @@ static int split_escaped_row(const char *line, char ***out_fields, size_t *out_c
     return 0;
 }
 
+/* line 한 줄을 split/unescape/normalize해 out_row 단일 Row 구조체로 복원한다. */
 static int parse_line_into_row(const char *line,
                                size_t expected_column_count,
                                Row *out_row)
@@ -444,6 +457,7 @@ static int parse_line_into_row(const char *line,
     return 0;
 }
 
+/* src Row를 깊은 복사해 dst에 만들고 성공 여부를 0/1로 반환한다. */
 static int copy_row(const Row *src, Row *dst)
 {
     size_t i;
@@ -474,6 +488,7 @@ static int copy_row(const Row *src, Row *dst)
     return 0;
 }
 
+/* scan 콜백으로 전달된 row를 materialize 배열에 누적해 read_all_rows를 구현한다. */
 static int read_all_rows_callback(const Row *row,
                                   long row_offset,
                                   void *user_data,
@@ -506,6 +521,7 @@ static int read_all_rows_callback(const Row *row,
     return 0;
 }
 
+/* table_name의 `.data` 파일이 없으면 생성하고, 이미 있으면 그대로 유지한다. */
 int ensure_table_data_file(const char *db_dir, const char *table_name,
                            char *errbuf, size_t errbuf_size)
 {
@@ -535,6 +551,7 @@ int ensure_table_data_file(const char *db_dir, const char *table_name,
     return STATUS_OK;
 }
 
+/* row를 `.data` 끝에 append하고 append 시작 파일 위치를 out_row_offset에 기록한다. */
 int append_row_to_table_with_offset(const char *db_dir, const char *table_name,
                                     const Row *row, long *out_row_offset,
                                     char *errbuf, size_t errbuf_size)
@@ -624,6 +641,7 @@ int append_row_to_table_with_offset(const char *db_dir, const char *table_name,
     return status;
 }
 
+/* row offset이 필요 없는 기존 호출자를 위해 append_row_to_table_with_offset을 감싼다. */
 int append_row_to_table(const char *db_dir, const char *table_name,
                         const Row *row,
                         char *errbuf, size_t errbuf_size)
@@ -633,6 +651,7 @@ int append_row_to_table(const char *db_dir, const char *table_name,
     return append_row_to_table_with_offset(db_dir, table_name, row, &row_offset, errbuf, errbuf_size);
 }
 
+/* `.data` 전체를 스트리밍으로 읽으며 각 row와 row_offset을 callback으로 전달한다. */
 int scan_table_rows_with_offsets(const char *db_dir, const char *table_name,
                                  size_t expected_column_count,
                                  RowScanCallback callback,
@@ -720,6 +739,7 @@ int scan_table_rows_with_offsets(const char *db_dir, const char *table_name,
     return STATUS_OK;
 }
 
+/* row_offset 위치 한 줄만 읽어 out_row에 복원하고 상태 코드를 반환한다. */
 int read_row_at_offset(const char *db_dir, const char *table_name,
                        long row_offset,
                        size_t expected_column_count,
@@ -782,6 +802,7 @@ int read_row_at_offset(const char *db_dir, const char *table_name,
     return STATUS_OK;
 }
 
+/* `.data` 전체를 Row 배열로 materialize해 out_rows/out_row_count에 채운다. */
 int read_all_rows_from_table(const char *db_dir, const char *table_name,
                              size_t expected_column_count,
                              Row **out_rows, size_t *out_row_count,
@@ -818,6 +839,7 @@ int read_all_rows_from_table(const char *db_dir, const char *table_name,
     return STATUS_OK;
 }
 
+/* row 하나가 소유한 values 배열과 각 문자열 메모리를 해제한다. */
 void free_row(Row *row)
 {
     if (row == NULL) {
@@ -829,6 +851,7 @@ void free_row(Row *row)
     row->value_count = 0U;
 }
 
+/* rows 배열 전체를 순회하며 각 row와 배열 메모리를 모두 해제한다. */
 void free_rows(Row *rows, size_t row_count)
 {
     size_t i;

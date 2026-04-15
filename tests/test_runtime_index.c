@@ -10,24 +10,31 @@
 
 #ifdef _WIN32
 #include <direct.h>
+/* 테스트용 디렉터리를 생성하기 위한 Windows mkdir 래퍼 매크로다. */
 #define MKDIR(path) _mkdir(path)
+/* 테스트용 디렉터리를 제거하기 위한 Windows rmdir 래퍼 매크로다. */
 #define RMDIR(path) _rmdir(path)
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+/* 테스트용 디렉터리를 생성하기 위한 POSIX mkdir 래퍼 매크로다. */
 #define MKDIR(path) mkdir((path), 0777)
+/* 테스트용 디렉터리를 제거하기 위한 POSIX rmdir 래퍼 매크로다. */
 #define RMDIR(path) rmdir(path)
 #endif
 
+/* 하나라도 실패한 테스트가 있었는지 기록하는 전역 플래그다. */
 static int tests_failed = 0;
 
+/* 실패 메시지와 파일/줄 번호를 출력해 어떤 검증이 깨졌는지 기록한다. */
 static void fail_test(const char *message, const char *file, int line)
 {
     fprintf(stderr, "TEST FAILED at %s:%d: %s\n", file, line, message);
     tests_failed = 1;
 }
 
+/* expr가 거짓이면 실패를 기록하고 현재 테스트를 종료한다. */
 #define ASSERT_TRUE(expr) do { \
     if (!(expr)) { \
         fail_test(#expr, __FILE__, __LINE__); \
@@ -35,6 +42,7 @@ static void fail_test(const char *message, const char *file, int line)
     } \
 } while (0)
 
+/* 두 문자열이 다르면 기대값과 실제값을 기록하고 현재 테스트를 종료한다. */
 #define ASSERT_STREQ(expected, actual) do { \
     if (strcmp((expected), (actual)) != 0) { \
         char _message[512]; \
@@ -44,16 +52,21 @@ static void fail_test(const char *message, const char *file, int line)
     } \
 } while (0)
 
+/* offset 추적 테스트에서 몇 번째 row를 봤는지와 캡처한 row offset을 보관한다. */
 typedef struct {
+    /* scan callback이 지금까지 방문한 row 개수다. */
     size_t seen_rows;
+    /* 목표 row가 시작한 파일 오프셋이다. */
     long target_offset;
 } OffsetCapture;
 
+/* path가 존재하면 삭제를 시도해 테스트 fixture를 초기화한다. */
 static void remove_if_exists(const char *path)
 {
     remove(path);
 }
 
+/* path 디렉터리가 없으면 생성해 runtime 테스트용 DB 디렉터리를 준비한다. */
 static void ensure_directory(const char *path)
 {
     if (MKDIR(path) != 0 && errno != EEXIST) {
@@ -62,6 +75,7 @@ static void ensure_directory(const char *path)
     }
 }
 
+/* runtime index 테스트가 사용하는 schema/data 파일과 디렉터리를 제거한다. */
 static void cleanup_test_db(void)
 {
     remove_if_exists("build/test_runtime_db/users.schema");
@@ -69,6 +83,7 @@ static void cleanup_test_db(void)
     RMDIR("build/test_runtime_db");
 }
 
+/* users 테이블 schema fixture를 생성해 runtime 로딩 테스트의 기반을 만든다. */
 static void write_users_schema(void)
 {
     FILE *schema_file;
@@ -87,6 +102,7 @@ static void write_users_schema(void)
     fclose(schema_file);
 }
 
+/* content 그대로 users.data에 기록해 기존 데이터에서 index를 rebuild하는 시나리오를 만든다. */
 static void write_users_data(const char *content)
 {
     FILE *data_file = fopen("build/test_runtime_db/users.data", "w");
@@ -100,6 +116,7 @@ static void write_users_data(const char *content)
     fclose(data_file);
 }
 
+/* scan callback으로 두 번째 row를 만났을 때 그 row의 파일 오프셋을 OffsetCapture에 저장한다. */
 static int capture_second_row_offset(const Row *row,
                                      long row_offset,
                                      void *user_data,
@@ -121,6 +138,7 @@ static int capture_second_row_offset(const Row *row,
     return 0;
 }
 
+/* 기존 data 파일에서 id 인덱스를 빌드하고 next_id가 max id + 1이 되는지 검증한다. */
 static void test_build_index_and_next_id_success(void)
 {
     ExecutionContext ctx = {0};
@@ -149,6 +167,7 @@ static void test_build_index_and_next_id_success(void)
     free_execution_context(&ctx);
 }
 
+/* 기존 data 파일에 duplicate id가 있으면 runtime 로딩이 INDEX ERROR로 실패하는지 확인한다. */
 static void test_duplicate_id_build_fails(void)
 {
     ExecutionContext ctx = {0};
@@ -163,6 +182,7 @@ static void test_duplicate_id_build_fails(void)
     free_execution_context(&ctx);
 }
 
+/* 비어 있는 id 값이 저장된 data 파일은 인덱스 빌드에 실패해야 함을 검증한다. */
 static void test_empty_id_build_fails(void)
 {
     ExecutionContext ctx = {0};
@@ -177,6 +197,7 @@ static void test_empty_id_build_fails(void)
     free_execution_context(&ctx);
 }
 
+/* canonical positive integer가 아닌 id가 저장돼 있으면 인덱스 빌드가 실패하는지 검증한다. */
 static void test_malformed_id_build_fails(void)
 {
     ExecutionContext ctx = {0};
@@ -191,6 +212,7 @@ static void test_malformed_id_build_fails(void)
     free_execution_context(&ctx);
 }
 
+/* 저장된 row의 offset을 다시 읽어 정확한 escape 복원과 단일 row 복구가 되는지 확인한다. */
 static void test_read_row_at_offset_round_trip(void)
 {
     Row read_back = {0};
@@ -217,6 +239,7 @@ static void test_read_row_at_offset_round_trip(void)
     free_row(&read_back);
 }
 
+/* runtime/index 관련 테스트를 전부 실행하고 결과에 맞는 종료 코드를 반환한다. */
 int main(void)
 {
     test_build_index_and_next_id_success();

@@ -4,16 +4,21 @@
 
 #include "lexer.h"
 
+/* lexer 테스트에서 기대하는 성공 상태 코드다. */
 enum {
+    /* 토큰화가 정상 완료됐음을 뜻한다. */
     STATUS_OK = 0,
+    /* 잘못된 문자나 리터럴 형식으로 토큰화가 실패했음을 뜻한다. */
     STATUS_LEX_ERROR = 3
 };
 
+/* message를 출력하고 테스트를 즉시 종료한다. */
 static void fail(const char *message) {
     fprintf(stderr, "test_lexer failed: %s\n", message);
     exit(1);
 }
 
+/* expected와 actual 정수가 같은지 검사하고 다르면 message와 함께 종료한다. */
 static void assert_int_eq(int expected, int actual, const char *message) {
     if (expected != actual) {
         fprintf(stderr, "test_lexer failed: %s (expected=%d actual=%d)\n", message, expected, actual);
@@ -21,6 +26,7 @@ static void assert_int_eq(int expected, int actual, const char *message) {
     }
 }
 
+/* expected와 actual 문자열이 같은지 검사하고 다르면 상세 메시지와 함께 종료한다. */
 static void assert_str_eq(const char *expected, const char *actual, const char *message) {
     if (strcmp(expected, actual) != 0) {
         fprintf(stderr, "test_lexer failed: %s (expected=%s actual=%s)\n", message, expected, actual);
@@ -28,6 +34,7 @@ static void assert_str_eq(const char *expected, const char *actual, const char *
     }
 }
 
+/* INSERT 문이 키워드, 식별자, 숫자, 문자열, EOF까지 올바르게 분해되는지 검증한다. */
 static void test_insert_tokens(void) {
     TokenArray tokens = {0};
     char errbuf[256] = {0};
@@ -49,6 +56,7 @@ static void test_insert_tokens(void) {
     free_token_array(&tokens);
 }
 
+/* SELECT * FROM 구문이 핵심 토큰으로 정확히 나뉘는지 검증한다. */
 static void test_select_star_tokens(void) {
     TokenArray tokens = {0};
     char errbuf[256] = {0};
@@ -64,6 +72,7 @@ static void test_select_star_tokens(void) {
     free_token_array(&tokens);
 }
 
+/* projection 컬럼 목록과 키워드의 대소문자 무시 동작을 검증한다. */
 static void test_select_column_tokens(void) {
     TokenArray tokens = {0};
     char errbuf[256] = {0};
@@ -80,6 +89,7 @@ static void test_select_column_tokens(void) {
     free_token_array(&tokens);
 }
 
+/* escaped string, 음수, 소수 리터럴이 원문 의미대로 토큰화되는지 검증한다. */
 static void test_string_and_number_literals(void) {
     TokenArray tokens = {0};
     char errbuf[256] = {0};
@@ -94,6 +104,7 @@ static void test_string_and_number_literals(void) {
     free_token_array(&tokens);
 }
 
+/* 허용되지 않은 문자가 들어오면 LEX ERROR로 실패하는지 검증한다. */
 static void test_invalid_character_fails(void) {
     TokenArray tokens = {0};
     char errbuf[256] = {0};
@@ -106,6 +117,7 @@ static void test_invalid_character_fails(void) {
     }
 }
 
+/* 닫히지 않은 문자열 리터럴이 명확한 오류 메시지와 함께 거절되는지 확인한다. */
 static void test_unterminated_string_fails(void) {
     TokenArray tokens = {0};
     char errbuf[256] = {0};
@@ -118,6 +130,7 @@ static void test_unterminated_string_fails(void) {
     }
 }
 
+/* lexer 단위 테스트를 모두 실행하고 통과 시 OK를 출력한다. */
 int main(void) {
     test_insert_tokens();
     test_select_star_tokens();

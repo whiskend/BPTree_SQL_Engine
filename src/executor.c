@@ -10,65 +10,87 @@
 #include "schema.h"
 #include "storage.h"
 
+/* 선형 SELECT 경로에서 스캔 중 공유할 상태로, schema/statement/result와 WHERE 컬럼 인덱스를 함께 묶는다. */
 typedef struct {
+    /* projection과 컬럼명 해석에 사용할 현재 테이블 스키마다. */
     const TableSchema *schema;
+    /* 현재 실행 중인 SELECT AST로, WHERE와 projection 정보를 담는다. */
     const SelectStatement *stmt;
+    /* 조건을 만족한 projection row를 누적할 QueryResult 버퍼다. */
     QueryResult *result;
+    /* WHERE 대상 컬럼의 schema index로, 조건이 없으면 -1이다. */
     int where_index;
 } SelectFullScanState;
 
+/* INSERT AST를 받아 runtime cache, auto-id, storage append, index 반영까지 수행하고 ExecResult를 채운다. */
 static int execute_insert(ExecutionContext *ctx, const InsertStatement *stmt,
                           ExecResult *out_result,
                           char *errbuf, size_t errbuf_size);
+/* SELECT AST를 받아 인덱스 경로 또는 full scan 경로를 고른 뒤 QueryResult를 구성해 반환한다. */
 static int execute_select(ExecutionContext *ctx, const SelectStatement *stmt,
                           ExecResult *out_result,
                           char *errbuf, size_t errbuf_size);
+/* id 자동 생성이 없는 테이블에서 schema/column list 규칙대로 최종 저장 Row를 만들고 성공 여부를 반환한다. */
 static int build_insert_row_existing_behavior(const TableSchema *schema, const InsertStatement *stmt,
                                               Row *out_row,
                                               char *errbuf, size_t errbuf_size);
+/* auto-id 테이블의 INSERT가 id 직접 지정 금지, 컬럼 중복 금지, value 개수 일치를 지키는지 검사해 상태 코드를 반환한다. */
 static int validate_insert_columns_for_auto_id(const TableRuntime *table,
                                                const InsertStatement *stmt,
                                                char *errbuf, size_t errbuf_size);
+/* auto-id 테이블용 최종 Row를 만들어 id 위치에는 generated_id 문자열을 넣고 나머지 컬럼을 채운 뒤 상태 코드를 반환한다. */
 static int build_insert_row_with_generated_id(const TableRuntime *table,
                                               const InsertStatement *stmt,
                                               uint64_t generated_id,
                                               Row *out_row,
                                               char *errbuf, size_t errbuf_size);
+/* SELECT projection 컬럼과 WHERE 컬럼이 schema에 존재하는지 검증하고, 문제 없으면 STATUS_OK를 반환한다. */
 static int validate_select_columns(const TableSchema *schema, const SelectStatement *stmt,
                                    char *errbuf, size_t errbuf_size);
+/* 현재 SELECT가 canonical integer 형태의 WHERE id = ? 인지 판정하고, 가능하면 out_id_key에 검색 키를 돌려준다. */
 static int can_use_id_index(const TableRuntime *table, const SelectStatement *stmt, uint64_t *out_id_key);
+/* B+Tree에서 id_key를 찾아 해당 row offset만 읽어 projection 결과를 만들고 used_index를 1로 설정한다. */
 static int execute_select_with_id_index(ExecutionContext *ctx,
                                         TableRuntime *table,
                                         const SelectStatement *stmt,
                                         uint64_t id_key,
                                         ExecResult *out_result,
                                         char *errbuf, size_t errbuf_size);
+/* 테이블 전체를 스트리밍 스캔하면서 WHERE와 projection을 적용해 결과를 쌓고 used_index를 0으로 유지한다. */
 static int execute_select_with_full_scan(ExecutionContext *ctx,
                                          TableRuntime *table,
                                          const SelectStatement *stmt,
                                          ExecResult *out_result,
                                          char *errbuf, size_t errbuf_size);
+/* source_row에서 SELECT projection에 해당하는 컬럼만 복사해 out_projected를 만들고 상태 코드를 반환한다. */
 static int project_single_row(const TableSchema *schema,
                               const SelectStatement *stmt,
                               const Row *source_row,
                               Row *out_projected,
                               char *errbuf, size_t errbuf_size);
+/* 이미 projection된 Row 하나를 QueryResult 뒤에 deep copy로 붙이고 성공 여부를 반환한다. */
 static int append_result_row(QueryResult *result,
                              const Row *projected_row,
                              char *errbuf, size_t errbuf_size);
+/* 단일 Row가 WHERE literal과 문자열 완전 일치하는지 검사해 1 또는 0을 반환한다. */
 static int row_matches_where_clause(const SelectStatement *stmt, int where_index, const Row *row);
+/* SELECT 결과 헤더에 들어갈 컬럼명 배열을 schema와 projection 정보로 초기화하고 상태 코드를 반환한다. */
 static int initialize_query_result_columns(const TableSchema *schema,
                                            const SelectStatement *stmt,
                                            QueryResult *out_result,
                                            char *errbuf, size_t errbuf_size);
+/* Row 하나를 문자열 단위로 deep copy해 dst에 복제하고, 성공 시 0 실패 시 1을 반환한다. */
 static int copy_row(const Row *src, Row *dst);
+/* NULL-safe 문자열 복사본을 새로 할당해 반환하며, 메모리 부족 시 NULL을 반환한다. */
 static char *dup_string(const char *src);
+/* full scan 중 각 row를 받아 WHERE 필터와 projection을 적용하고 result에 append하는 storage callback이다. */
 static int select_full_scan_callback(const Row *row,
                                      long row_offset,
                                      void *user_data,
                                      char *errbuf,
                                      size_t errbuf_size);
 
+/* printf 형식 문자열과 가변 인자를 받아 errbuf에 executor 계층 에러 메시지를 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
 {
     va_list args;
@@ -82,6 +104,7 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
     va_end(args);
 }
 
+/* 하위 모듈 상태 코드를 executor 관점의 상태와 prefix 붙은 메시지로 변환해 caller에게 반환한다. */
 static int translate_module_status(int raw_status, int mapped_status,
                                    const char *prefix,
                                    char *errbuf, size_t errbuf_size)
@@ -112,6 +135,7 @@ static int translate_module_status(int raw_status, int mapped_status,
     return mapped_status;
 }
 
+/* src의 복사본을 heap에 만들고 반환하며, src가 NULL이면 빈 문자열을 복사한다. */
 static char *dup_string(const char *src)
 {
     size_t length;
@@ -131,6 +155,7 @@ static char *dup_string(const char *src)
     return copy;
 }
 
+/* src Row의 각 필드를 heap 복사해 dst에 채우고, 성공 시 0 실패 시 1을 반환한다. */
 static int copy_row(const Row *src, Row *dst)
 {
     size_t i;
@@ -161,6 +186,7 @@ static int copy_row(const Row *src, Row *dst)
     return 0;
 }
 
+/* QueryResult 내부의 columns/rows 메모리를 모두 해제하고 비어 있는 상태로 되돌린다. */
 static void free_query_result_contents(QueryResult *query_result)
 {
     size_t row_index;
@@ -190,6 +216,7 @@ static void free_query_result_contents(QueryResult *query_result)
     query_result->row_count = 0U;
 }
 
+/* Statement 타입을 보고 INSERT/SELECT 실행 함수로 위임해 최종 ExecResult와 상태 코드를 반환한다. */
 int execute_statement(ExecutionContext *ctx, const Statement *stmt,
                       ExecResult *out_result,
                       char *errbuf, size_t errbuf_size)
@@ -212,6 +239,7 @@ int execute_statement(ExecutionContext *ctx, const Statement *stmt,
     }
 }
 
+/* ExecResult가 소유한 query_result 메모리를 해제하고 메타데이터를 초기 상태로 정리한다. */
 void free_exec_result(ExecResult *result)
 {
     if (result == NULL) {
@@ -225,6 +253,7 @@ void free_exec_result(ExecResult *result)
     result->generated_id = 0U;
 }
 
+/* auto-id가 없는 기존 INSERT 규칙대로 최종 Row를 만들고, 규칙 위반 시 EXEC ERROR를 반환한다. */
 static int build_insert_row_existing_behavior(const TableSchema *schema, const InsertStatement *stmt,
                                               Row *out_row,
                                               char *errbuf, size_t errbuf_size)
@@ -319,6 +348,7 @@ static int build_insert_row_existing_behavior(const TableSchema *schema, const I
     return STATUS_OK;
 }
 
+/* auto-id 테이블에서 사용자가 id를 넣지 않았는지와 컬럼/value 구성이 유효한지 검사한다. */
 static int validate_insert_columns_for_auto_id(const TableRuntime *table,
                                                const InsertStatement *stmt,
                                                char *errbuf, size_t errbuf_size)
@@ -386,6 +416,7 @@ static int validate_insert_columns_for_auto_id(const TableRuntime *table,
     return STATUS_OK;
 }
 
+/* generated_id를 schema의 id 위치에 넣고 나머지 값을 배치해 auto-id INSERT용 최종 Row를 만든다. */
 static int build_insert_row_with_generated_id(const TableRuntime *table,
                                               const InsertStatement *stmt,
                                               uint64_t generated_id,
@@ -466,6 +497,7 @@ static int build_insert_row_with_generated_id(const TableRuntime *table,
     return STATUS_OK;
 }
 
+/* SELECT가 참조하는 projection/WHERE 컬럼이 모두 schema에 존재하는지 검사해 상태 코드를 반환한다. */
 static int validate_select_columns(const TableSchema *schema, const SelectStatement *stmt,
                                    char *errbuf, size_t errbuf_size)
 {
@@ -499,6 +531,7 @@ static int validate_select_columns(const TableSchema *schema, const SelectStatem
     return STATUS_OK;
 }
 
+/* SELECT 결과 헤더에 표시할 컬럼명을 복사해 QueryResult.columns를 초기화한다. */
 static int initialize_query_result_columns(const TableSchema *schema,
                                            const SelectStatement *stmt,
                                            QueryResult *out_result,
@@ -534,6 +567,7 @@ static int initialize_query_result_columns(const TableSchema *schema,
     return STATUS_OK;
 }
 
+/* Row의 where_index 필드가 WHERE literal과 문자열로 정확히 같은지 판정해 1 또는 0을 반환한다. */
 static int row_matches_where_clause(const SelectStatement *stmt, int where_index, const Row *row)
 {
     const char *current_value;
@@ -554,6 +588,7 @@ static int row_matches_where_clause(const SelectStatement *stmt, int where_index
     return strcmp(current_value, stmt->where_clause.value.text) == 0;
 }
 
+/* source_row에서 projection 대상 컬럼만 뽑아 out_projected로 복사하고 상태 코드를 반환한다. */
 static int project_single_row(const TableSchema *schema,
                               const SelectStatement *stmt,
                               const Row *source_row,
@@ -596,6 +631,7 @@ static int project_single_row(const TableSchema *schema,
     return STATUS_OK;
 }
 
+/* projected_row를 QueryResult.rows 뒤에 확장 저장해 결과 집합을 한 행 늘린다. */
 static int append_result_row(QueryResult *result,
                              const Row *projected_row,
                              char *errbuf, size_t errbuf_size)
@@ -623,6 +659,7 @@ static int append_result_row(QueryResult *result,
     return STATUS_OK;
 }
 
+/* storage 스캔 callback으로, 전달된 row에 WHERE를 적용하고 맞으면 projection 후 결과에 붙인다. */
 static int select_full_scan_callback(const Row *row,
                                      long row_offset,
                                      void *user_data,
@@ -658,6 +695,7 @@ static int select_full_scan_callback(const Row *row,
     return 0;
 }
 
+/* 현재 SELECT가 인덱스 가능한 WHERE id = canonical_integer 형태인지 검사한다. */
 static int can_use_id_index(const TableRuntime *table, const SelectStatement *stmt, uint64_t *out_id_key)
 {
     if (out_id_key != NULL) {
@@ -683,6 +721,7 @@ static int can_use_id_index(const TableRuntime *table, const SelectStatement *st
     return try_parse_indexable_id_literal(&stmt->where_clause.value, out_id_key);
 }
 
+/* B+Tree로 id_key를 찾아 단 하나의 row offset만 읽고 projection 결과를 구성한다. */
 static int execute_select_with_id_index(ExecutionContext *ctx,
                                         TableRuntime *table,
                                         const SelectStatement *stmt,
@@ -741,6 +780,7 @@ static int execute_select_with_id_index(ExecutionContext *ctx,
     return STATUS_OK;
 }
 
+/* storage의 스트리밍 row scan을 이용해 WHERE와 projection을 적용하는 기존 SELECT 경로다. */
 static int execute_select_with_full_scan(ExecutionContext *ctx,
                                          TableRuntime *table,
                                          const SelectStatement *stmt,
@@ -774,6 +814,7 @@ static int execute_select_with_full_scan(ExecutionContext *ctx,
     return STATUS_OK;
 }
 
+/* INSERT를 실행해 auto-id 생성, 파일 append, 인덱스 갱신과 ExecResult 메타데이터 기록까지 처리한다. */
 static int execute_insert(ExecutionContext *ctx, const InsertStatement *stmt,
                           ExecResult *out_result,
                           char *errbuf, size_t errbuf_size)
@@ -853,6 +894,7 @@ static int execute_insert(ExecutionContext *ctx, const InsertStatement *stmt,
     return STATUS_OK;
 }
 
+/* SELECT를 실행하면서 id 인덱스 경로와 full scan 경로 중 하나를 선택해 QueryResult를 반환한다. */
 static int execute_select(ExecutionContext *ctx, const SelectStatement *stmt,
                           ExecResult *out_result,
                           char *errbuf, size_t errbuf_size)

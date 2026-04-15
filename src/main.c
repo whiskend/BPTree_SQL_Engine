@@ -9,6 +9,7 @@
 #include "runtime.h"
 #include "utils.h"
 
+/* message가 비어 있지 않을 때만 stderr에 한 줄로 출력하는 공용 에러 출력 헬퍼다. */
 static void print_error_message(const char *message)
 {
     if (message != NULL && message[0] != '\0') {
@@ -16,6 +17,11 @@ static void print_error_message(const char *message)
     }
 }
 
+/*
+ * 프로그램 진입점이다.
+ * CLI 인자를 받아 SQL 파일을 읽고, lexer/parser/executor/runtime을 순서대로 호출해
+ * 각 SQL 문을 실행한 뒤 종료 코드를 반환한다.
+ */
 int main(int argc, char **argv)
 {
     CliOptions options = {0};

@@ -4,12 +4,14 @@
 #include "bptree.h"
 #include "errors.h"
 
+/* 실패 메시지를 stderr로 출력하고 프로세스를 종료해 테스트 중단을 명확히 만든다. */
 static void fail(const char *message)
 {
     fprintf(stderr, "test_bptree failed: %s\n", message);
     exit(1);
 }
 
+/* condition이 거짓이면 message와 함께 테스트를 즉시 실패시킨다. */
 static void assert_true(int condition, const char *message)
 {
     if (!condition) {
@@ -17,6 +19,7 @@ static void assert_true(int condition, const char *message)
     }
 }
 
+/* tree의 가장 왼쪽 leaf를 찾아 leaf chain 순회 시작점으로 반환한다. */
 static BPTreeNode *leftmost_leaf(BPTree *tree)
 {
     BPTreeNode *node = tree->root;
@@ -28,6 +31,7 @@ static BPTreeNode *leftmost_leaf(BPTree *tree)
     return node;
 }
 
+/* 순차 삽입 후 모든 key가 검색되고 offset이 정확히 매핑되는지 검증한다. */
 static void test_sequential_insert_and_search(void)
 {
     BPTree tree = {0};
@@ -54,6 +58,7 @@ static void test_sequential_insert_and_search(void)
     bptree_destroy(&tree);
 }
 
+/* 비정렬 순서로 삽입해도 search가 올바른 leaf와 offset을 찾는지 검증한다. */
 static void test_random_insert_and_search(void)
 {
     BPTree tree = {0};
@@ -81,6 +86,7 @@ static void test_random_insert_and_search(void)
     bptree_destroy(&tree);
 }
 
+/* 대량 삽입으로 root split과 internal split이 일어난 뒤에도 검색과 validate가 유지되는지 본다. */
 static void test_root_and_internal_split(void)
 {
     BPTree tree = {0};
@@ -107,6 +113,7 @@ static void test_root_and_internal_split(void)
     bptree_destroy(&tree);
 }
 
+/* 같은 key를 두 번 넣으면 duplicate key 오류로 거절되는지 확인한다. */
 static void test_duplicate_key_insert_fails(void)
 {
     BPTree tree = {0};
@@ -120,6 +127,7 @@ static void test_duplicate_key_insert_fails(void)
     bptree_destroy(&tree);
 }
 
+/* leaf chain을 왼쪽부터 순회했을 때 key가 오름차순으로 모두 방문되는지 검증한다. */
 static void test_leaf_chain_sorted(void)
 {
     BPTree tree = {0};
@@ -153,6 +161,7 @@ static void test_leaf_chain_sorted(void)
     bptree_destroy(&tree);
 }
 
+/* 모든 B+Tree 단위 테스트를 순서대로 실행하고 통과 시 OK를 출력한다. */
 int main(void)
 {
     test_sequential_insert_and_search();

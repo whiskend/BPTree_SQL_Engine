@@ -5,11 +5,13 @@
 #include "benchmark.h"
 #include "errors.h"
 
+/* benchmark 바이너리의 CLI 인자 형식을 stdout에 출력한다. */
 static void print_usage(const char *program_name)
 {
     printf("Usage: %s -d <db_dir> -t <table_name> -n <row_count> -p <probe_count>\n", program_name);
 }
 
+/* 10진수 문자열 text를 size_t로 파싱해 out_value에 저장하고 성공 시 1을 반환한다. */
 static int parse_size_arg(const char *text, size_t *out_value)
 {
     char *endptr = NULL;
@@ -28,6 +30,7 @@ static int parse_size_arg(const char *text, size_t *out_value)
     return 1;
 }
 
+/* CLI 인자를 해석한 뒤 run_benchmark를 호출하고 측정 결과를 사람이 읽기 쉬운 형식으로 출력한다. */
 int main(int argc, char **argv)
 {
     const char *db_dir = NULL;

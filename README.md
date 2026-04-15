@@ -1,194 +1,90 @@
 # B+Tree SQL Engine
 
-## 개요
+## 전체 구조
 
-이 프로젝트는 기존 파일 기반 SQL 처리기 위에 `id -> row_offset` 메모리 기반 B+Tree 인덱스를 얹은 미니 SQL 엔진이다.
+![B+Tree SQL Engine 단순 구조도](docs/architecture_no_runtime.svg)
 
-기존 파이프라인은 유지한다.
+## B+Tree의 장점
 
-- `Lexer -> Parser -> Executor -> Storage`
-- 저장 포맷은 `<table>.schema`, `<table>.data`
-- `WHERE`는 단일 `column = literal`
-- 출력 형식은 기존과 동일
+### 1. 검색 성능이 안정적이다
 
-추가된 핵심 기능은 다음과 같다.
-
-- `id` 컬럼이 있는 테이블은 `INSERT` 시 `id`를 자동 생성한다.
-- `id` 컬럼이 있는 테이블은 첫 접근 시 `.data` 파일을 스캔해 B+Tree 인덱스를 1회 빌드한다.
-- `SELECT ... WHERE id = ?` 중 canonical positive integer literal인 경우에만 B+Tree를 사용한다.
-- 다른 컬럼 조건 조회는 기존처럼 선형 탐색을 수행한다.
-
-## 아키텍처
-
-```mermaid
-flowchart LR
-    A["SQL File"] --> B["Lexer"]
-    B --> C["Parser"]
-    C --> D["Executor"]
-    D --> E["Runtime Cache"]
-    D --> F["Storage"]
-    E --> G["B+Tree (id -> row_offset)"]
-    F --> H[".schema / .data"]
-```
-
-### Runtime Cache
-
-한 실행 안에서 같은 테이블을 여러 번 다룰 수 있으므로, statement마다 `.data`를 다시 스캔하지 않기 위해 `ExecutionContext`를 둔다.
-
-- `ExecutionContext`
-  - `db_dir`
-  - 테이블별 `TableRuntime` 배열
-- `TableRuntime`
-  - schema 캐시
-  - `id` 컬럼 존재 여부
-  - `next_id`
-  - `BPTree id_index`
-
-## 저장 구조
-
-### Schema
-
-`users.schema`
+![alt text](image.png)
+B+Tree는 전체 데이터를 처음부터 끝까지 확인하지 않고, 트리 구조를 따라 내려가며 key를 찾습니다.
 
 ```text
-id
-name
-age
+전체 스캔: O(N)
+B+Tree 검색: O(log N)
 ```
 
-### Data
+데이터가 많아질수록 전체 스캔보다 유리합니다.
 
-`users.data`
+### 2. 정렬된 key를 유지한다
 
-```text
-1|Alice|20
-2|Bob|25
-```
+![alt text](image-1.png)
 
-### Escape 규칙
+B+Tree는 key를 정렬된 상태로 유지합니다.
 
-- `\\` : 백슬래시
-- `\|` : 실제 `|`
-- `\n` : 줄바꿈
-
-### 인덱스 값
-
-B+Tree leaf value는 row 전체가 아니라 `.data` 파일의 `row_offset`이다.
-
-- key: `uint64_t id`
-- value: `long row_offset`
-
-이 덕분에 `WHERE id = ?`는 전체 파일을 다시 읽지 않고, 인덱스로 offset을 찾은 뒤 그 row 한 줄만 바로 읽을 수 있다.
-
-## id 자동 생성 규칙
-
-- indexed table의 기준: schema에 정확히 `id` 컬럼이 있으면 indexed table
-- 빈 테이블이면 `id`는 `1`부터 시작
-- 기존 row가 있으면 `next_id = max(existing_id) + 1`
-- 기존 `.data`의 `id`는 canonical positive integer만 허용한다
-- malformed / duplicate / empty id가 있으면 index build는 실패한다
-
-### 허용되는 INSERT
-
-schema:
-
-```text
-id
-name
-age
-```
-
-허용:
+그래서 단순 조회뿐 아니라 다음과 같은 작업에도 유리합니다.
 
 ```sql
-INSERT INTO users VALUES ('Alice', 20);
-INSERT INTO users (age, name) VALUES (21, 'Bob');
+SELECT * FROM users WHERE id BETWEEN 10 AND 100;
+SELECT * FROM users ORDER BY id;
 ```
 
-실제 저장:
+Hash Table은 단일 key 조회에는 빠를 수 있지만, key의 정렬 순서를 유지하지 않기 때문에 범위 검색이나 정렬에는 약합니다.
+
+
+### 3. 디스크 기반 DB에 잘 맞는다
+
+![alt text](image-2.png)
+실제 DB는 데이터를 디스크나 SSD의 페이지 단위로 읽습니다.
+
+B+Tree는 노드 하나에 여러 key를 담기 때문에 트리 높이가 낮고, 디스크 접근 횟수를 줄이는 데 유리합니다.
 
 ```text
-1|Alice|20
-2|Bob|21
+트리 높이가 낮음
+-> 디스크 접근 횟수 감소
+-> DB 인덱스에 적합
 ```
 
-금지:
+이렇게 하면 인덱스는 row의 위치만 빠르게 찾고, 실제 row 읽기는 storage 계층이 담당합니다.
 
-```sql
-INSERT INTO users (id, name) VALUES (7, 'Alice');
-```
+## B+Tree의 한계
 
-## 인덱스 사용 조건
+### 1. 인덱스 유지 비용이 있다
 
-다음 조건을 모두 만족할 때만 B+Tree를 사용한다.
+![alt text](image-3.png)
 
-1. 테이블에 `id` 컬럼이 있어야 한다.
-2. `WHERE`가 있어야 한다.
-3. `WHERE` 컬럼이 정확히 `id`여야 한다.
-4. literal이 canonical positive integer여야 한다.
-
-예시:
-
-- `WHERE id = 123` -> index 사용
-- `WHERE id = '123'` -> index 사용
-- `WHERE id = '00123'` -> index 사용 안 함
-- `WHERE id = 1.0` -> index 사용 안 함
-- `WHERE name = 'Alice'` -> index 사용 안 함
-
-index 사용 여부는 `ExecResult.used_index`로 검증한다.
-
-## 복잡도
-
-- indexed select: 대략 `O(log N)` + single-row read
-- non-index select: `O(N)`
-
-## 빌드와 테스트
-
-```sh
-make
-make test
-```
-
-기본 실행:
-
-```sh
-./sql_processor -d ./db -f ./queries/insert_users.sql
-./sql_processor -d ./db -f ./queries/select_users.sql
-./sql_processor -d ./db -f ./queries/select_user_where.sql
-```
-
-## 벤치마크
-
-벤치마크 바이너리:
-
-```sh
-make
-./build/benchmark_bptree -d ./build/benchmark_db -t users -n 1000000 -p 100
-```
-
-출력 예시:
+B+Tree는 조회를 빠르게 해주지만, INSERT 때는 추가 작업이 필요합니다.
 
 ```text
-Rows inserted: 1000000
-Insert total: 8421.53 ms
-ID select avg: 0.08 ms
-Name select avg: 57.31 ms
-Speedup: 716.37x
+.data 파일에 row 저장
++ B+Tree에 id -> row_offset 삽입
 ```
 
-## 테스트 구성
+즉 인덱스가 없는 경우보다 쓰기 비용이 증가할 수 있습니다.
 
-- `tests/test_lexer.c`
-- `tests/test_parser.c`
-- `tests/test_storage.c`
-- `tests/test_bptree.c`
-- `tests/test_runtime_index.c`
-- `tests/test_executor.c`
-- `tests/test_integration.sh`
+### 2. 노드 split 비용이 있다
 
-## 한계점
+B+Tree 노드가 가득 차면 split이 발생합니다.
 
-- 인덱스는 메모리 기반이며 디스크에 영속화되지 않는다.
-- 프로세스 시작 후 첫 테이블 접근 시 `.data`를 스캔해서 rebuild한다.
-- `WHERE`는 여전히 단일 equality만 지원한다.
-- `UPDATE`, `DELETE`, `JOIN`, range scan은 아직 없다.
+```text
+leaf node split
+internal node split
+parent key 갱신
+root 변경 가능
+```
+
+대부분의 경우 안정적으로 동작하지만, 대량 INSERT에서는 split 비용이 누적될 수 있습니다.
+
+### 3. 추가 메모리나 디스크 공간이 필요하다
+![alt text](image-4.png)
+
+인덱스는 원본 데이터와 별도로 저장됩니다.
+
+```text
+원본 데이터
++ B+Tree 노드
++ key 배열
++ child pointer 또는 row_offset
+```

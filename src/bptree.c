@@ -8,11 +8,13 @@
 
 #include "errors.h"
 
+/* validate 과정에서 리프 깊이 일관성을 추적하는 내부 상태 구조체다. */
 typedef struct {
-    int leaf_depth_set;
-    size_t leaf_depth;
+    int leaf_depth_set; /* 첫 leaf 깊이를 이미 기록했는지 나타낸다. */
+    size_t leaf_depth;  /* 모든 leaf가 공유해야 하는 기대 깊이다. */
 } ValidationState;
 
+/* bptree 모듈 내부에서 서식 문자열 기반 에러 메시지를 errbuf에 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
 {
     va_list args;
@@ -26,6 +28,7 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
     va_end(args);
 }
 
+/* is_leaf 여부를 반영한 빈 노드 하나를 할당해 반환하고 실패 시 NULL을 반환한다. */
 static BPTreeNode *create_node(int is_leaf)
 {
     BPTreeNode *node = (BPTreeNode *)calloc(1U, sizeof(BPTreeNode));
@@ -38,14 +41,15 @@ static BPTreeNode *create_node(int is_leaf)
     return node;
 }
 
+/* root부터 key가 들어가야 할 leaf까지 내려가 해당 leaf 포인터를 반환한다. */
 static BPTreeNode *find_leaf_node(BPTreeNode *root, uint64_t key)
 {
     BPTreeNode *node = root;
 
-    while (node != NULL && !node->is_leaf) {
+    while (node != NULL && !node->is_leaf) { // 노드가 비어있지 않고, 내부 노드라면 -> 즉 
         size_t child_index = 0U;
 
-        while (child_index < node->key_count && key >= node->keys[child_index]) {
+        while (child_index < node->key_count && key >= node->keys[child_index]) { // 리프 노드 안을 전부 순회
             child_index++;
         }
 
@@ -55,6 +59,7 @@ static BPTreeNode *find_leaf_node(BPTreeNode *root, uint64_t key)
     return node;
 }
 
+/* overflow가 없는 leaf에 key와 row_offset을 정렬 상태로 끼워 넣고 상태를 반환한다. */
 static int insert_into_leaf(BPTreeNode *leaf, uint64_t key, long row_offset)
 {
     size_t insert_index = 0U;
@@ -79,6 +84,7 @@ static int insert_into_leaf(BPTreeNode *leaf, uint64_t key, long row_offset)
     return STATUS_OK;
 }
 
+/* overflow가 없는 internal node에 separator와 right child를 삽입한다. */
 static int insert_into_internal_node(BPTreeNode *node,
                                      size_t left_child_index,
                                      uint64_t separator_key,
@@ -103,6 +109,7 @@ static int insert_into_internal_node(BPTreeNode *node,
     return STATUS_OK;
 }
 
+/* overflow가 난 internal node를 split하면서 새 separator를 parent로 전파한다. */
 static int split_internal_and_insert(BPTree *tree,
                                      BPTreeNode *node,
                                      size_t left_child_index,
@@ -110,6 +117,7 @@ static int split_internal_and_insert(BPTree *tree,
                                      BPTreeNode *right_child,
                                      char *errbuf, size_t errbuf_size);
 
+/* left/right 두 자식을 parent에 연결하거나 필요하면 새 root를 생성한다. */
 static int insert_into_parent(BPTree *tree,
                               BPTreeNode *left,
                               uint64_t separator_key,
@@ -160,6 +168,7 @@ static int insert_into_parent(BPTree *tree,
                                      errbuf, errbuf_size);
 }
 
+/* overflow가 난 leaf를 좌우로 나누고 leaf chain/parent separator를 함께 갱신한다. */
 static int split_leaf_and_insert(BPTree *tree,
                                  BPTreeNode *leaf,
                                  uint64_t key,
@@ -233,6 +242,7 @@ static int split_leaf_and_insert(BPTree *tree,
     return insert_into_parent(tree, leaf, new_leaf->keys[0], new_leaf, errbuf, errbuf_size);
 }
 
+/* overflow가 난 internal node를 두 노드로 분할하고 promoted key를 상위로 올린다. */
 static int split_internal_and_insert(BPTree *tree,
                                      BPTreeNode *node,
                                      size_t left_child_index,
@@ -311,6 +321,7 @@ static int split_internal_and_insert(BPTree *tree,
     return insert_into_parent(tree, node, promoted_key, right_node, errbuf, errbuf_size);
 }
 
+/* node 하위 전체를 후위 순회로 해제해 트리 소멸에 사용한다. */
 static void destroy_node(BPTreeNode *node)
 {
     size_t i;
@@ -328,6 +339,7 @@ static void destroy_node(BPTreeNode *node)
     free(node);
 }
 
+/* node 서브트리의 부모 포인터, key 범위, leaf depth를 재귀적으로 검증한다. */
 static int validate_node(const BPTreeNode *node,
                          const BPTreeNode *expected_parent,
                          int has_lower, uint64_t lower_bound,
@@ -416,6 +428,7 @@ static int validate_node(const BPTreeNode *node,
     return STATUS_OK;
 }
 
+/* root에서 가장 왼쪽 leaf까지 내려가 leaf chain 시작 노드를 반환한다. */
 static BPTreeNode *find_leftmost_leaf(BPTreeNode *root)
 {
     BPTreeNode *node = root;
@@ -427,6 +440,7 @@ static BPTreeNode *find_leftmost_leaf(BPTreeNode *root)
     return node;
 }
 
+/* out_tree를 빈 트리 상태로 초기화하고 상태 코드를 반환한다. */
 int bptree_init(BPTree *out_tree, char *errbuf, size_t errbuf_size)
 {
     if (out_tree == NULL) {
@@ -442,6 +456,7 @@ int bptree_init(BPTree *out_tree, char *errbuf, size_t errbuf_size)
     return STATUS_OK;
 }
 
+/* tree에서 key를 찾고, 발견 여부와 row offset을 out_found/out_offset에 기록한다. */
 int bptree_search(const BPTree *tree, uint64_t key,
                   long *out_offset, int *out_found,
                   char *errbuf, size_t errbuf_size)
@@ -482,24 +497,34 @@ int bptree_search(const BPTree *tree, uint64_t key,
     return STATUS_OK;
 }
 
+/* tree에 key와 row_offset을 삽입하고 필요한 split을 처리한 뒤 상태를 반환한다. */
 int bptree_insert(BPTree *tree, uint64_t key, long row_offset,
                   char *errbuf, size_t errbuf_size)
 {
     BPTreeNode *leaf;
     int status;
 
-    if (tree == NULL) {
+    /* ========================
+        tree가 비었으면 !!에러!!
+       ======================== */
+    if (tree == NULL) { // 1. 예외 체크
         set_error(errbuf, errbuf_size, "INDEX ERROR: invalid tree pointer");
         return STATUS_INDEX_ERROR;
     }
 
+    /* ========================
+        root가 비었으면
+       ======================== */
     if (tree->root == NULL) {
-        tree->root = create_node(1);
-        if (tree->root == NULL) {
+        tree->root = create_node(1); // 2. 첫 삽입(root 생성)
+        if (tree->root == NULL) { // create_node가 실패한 경우 !!에러!!
             set_error(errbuf, errbuf_size, "INDEX ERROR: out of memory");
             return STATUS_INDEX_ERROR;
         }
 
+        /* ========================
+        루트 노드에 key와 offset을 넣고, 개수를 1로 설정하는 초기 삽입 코드
+       ======================== */
         tree->root->keys[0] = key;
         tree->root->ptrs.row_offsets[0] = row_offset;
         tree->root->key_count = 1U;
@@ -507,29 +532,33 @@ int bptree_insert(BPTree *tree, uint64_t key, long row_offset,
         return STATUS_OK;
     }
 
-    leaf = find_leaf_node(tree->root, key);
-    if (leaf == NULL) {
+    /* ========================
+        root가 비어있지 않으면
+       ======================== */
+    leaf = find_leaf_node(tree->root, key); // 3. 들어갈 리프 찾기
+    if (leaf == NULL) { //리프가 비었으면 !!에러!!
         set_error(errbuf, errbuf_size, "INDEX ERROR: failed to locate insertion leaf");
         return STATUS_INDEX_ERROR;
     }
 
     if (leaf->key_count < BPTREE_MAX_KEYS) {
-        status = insert_into_leaf(leaf, key, row_offset);
-        if (status != STATUS_OK) {
+        status = insert_into_leaf(leaf, key, row_offset); // 4. 그냥 삽입 or
+        if (status != STATUS_OK) { //leaf가 정상적으로 들어가지 못한 !!에러!!
             set_error(errbuf, errbuf_size, "INDEX ERROR: duplicate key %" PRIu64, key);
             return STATUS_INDEX_ERROR;
         }
-    } else {
-        status = split_leaf_and_insert(tree, leaf, key, row_offset, errbuf, errbuf_size);
+    } else { // 한 노드의 최대 키 개수를 초과하면
+        status = split_leaf_and_insert(tree, leaf, key, row_offset, errbuf, errbuf_size); //4. or split
         if (status != STATUS_OK) {
             return status;
         }
     }
 
-    tree->key_count += 1U;
+    tree->key_count += 1U; // 5. 전체 key 수 증가
     return STATUS_OK;
 }
 
+/* 트리 전체를 검증해 leaf chain, depth, key count가 일관적인지 검사한다. */
 int bptree_validate(const BPTree *tree, char *errbuf, size_t errbuf_size)
 {
     ValidationState state = {0};
@@ -585,6 +614,7 @@ int bptree_validate(const BPTree *tree, char *errbuf, size_t errbuf_size)
     return STATUS_OK;
 }
 
+/* tree가 소유한 모든 노드를 해제하고 root/key_count를 빈 상태로 되돌린다. */
 void bptree_destroy(BPTree *tree)
 {
     if (tree == NULL) {

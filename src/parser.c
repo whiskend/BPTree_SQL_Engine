@@ -6,22 +6,26 @@
 
 #include "utils.h"
 
+/* parser.c 내부에서만 쓰는 상태 코드 별칭이다. */
 enum {
-    STATUS_OK = 0,
-    STATUS_PARSE_ERROR = 4
+    STATUS_OK = 0,          /* 파싱이 정상적으로 끝났음을 뜻한다. */
+    STATUS_PARSE_ERROR = 4  /* SQL 문법 해석 중 오류가 났음을 뜻한다. */
 };
 
+/* 현재 파싱 중인 토큰 배열과 cursor 위치를 묶어 다루는 내부 상태 구조체다. */
 typedef struct {
-    const TokenArray *tokens;
-    size_t current;
+    const TokenArray *tokens; /* 파서가 읽고 있는 전체 토큰 배열이다. */
+    size_t current;           /* 다음에 읽을 토큰 인덱스다. */
 } Parser;
 
+/* 단일 message를 errbuf에 복사해 parser 오류 문자열을 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *message) {
     if (errbuf != NULL && errbuf_size > 0) {
         snprintf(errbuf, errbuf_size, "%s", message);
     }
 }
 
+/* char* 배열 items/count가 소유한 문자열과 배열 메모리를 모두 해제한다. */
 static void free_string_list(char **items, size_t count) {
     size_t i;
 
@@ -35,6 +39,7 @@ static void free_string_list(char **items, size_t count) {
     free(items);
 }
 
+/* LiteralValue 배열 items/count가 소유한 text와 배열 메모리를 모두 해제한다. */
 static void free_literal_list(LiteralValue *items, size_t count) {
     size_t i;
 
@@ -48,14 +53,17 @@ static void free_literal_list(LiteralValue *items, size_t count) {
     free(items);
 }
 
+/* parser.current가 가리키는 현재 토큰 포인터를 반환한다. */
 static const Token *parser_peek(Parser *parser) {
     return &parser->tokens->items[parser->current];
 }
 
+/* 방금 소비한 이전 토큰 포인터를 반환한다. */
 static const Token *parser_previous(Parser *parser) {
     return &parser->tokens->items[parser->current - 1];
 }
 
+/* EOF가 아니면 cursor를 한 칸 전진시키고, 소비된 토큰 포인터를 반환한다. */
 static const Token *parser_advance(Parser *parser) {
     if (parser_peek(parser)->type != TOKEN_EOF) {
         ++parser->current;
@@ -63,6 +71,7 @@ static const Token *parser_advance(Parser *parser) {
     return parser_previous(parser);
 }
 
+/* 현재 토큰 타입이 type이면 소비하고 1, 아니면 그대로 두고 0을 반환한다. */
 static int parser_match(Parser *parser, TokenType type) {
     if (parser_peek(parser)->type != type) {
         return 0;
@@ -71,13 +80,14 @@ static int parser_match(Parser *parser, TokenType type) {
     return 1;
 }
 
+/* 문장 사이에 있는 연속 세미콜론을 모두 건너뛰어 empty statement를 무시한다. */
 static void parser_skip_semicolons(Parser *parser) {
     while (parser_match(parser, TOKEN_SEMICOLON)) {
         /* empty statement separators are ignored */
     }
 }
 
-
+/* 현재 토큰이 기대한 type이 아니면 message를 기록하고 parse error를 반환한다. */
 static int parser_expect_with_message(Parser *parser, TokenType type, const char *message, char *errbuf, size_t errbuf_size) {
     if (parser_match(parser, type)) {
         return STATUS_OK;
@@ -87,6 +97,7 @@ static int parser_expect_with_message(Parser *parser, TokenType type, const char
     return STATUS_PARSE_ERROR;
 }
 
+/* 식별자 text를 out_items 동적 배열 뒤에 복제해 붙이고 성공 시 1을 반환한다. */
 static int append_identifier(char ***out_items, size_t *out_count, const char *text) {
     char **grown = (char **)realloc(*out_items, sizeof(char *) * (*out_count + 1));
     if (grown == NULL) {
@@ -102,6 +113,7 @@ static int append_identifier(char ***out_items, size_t *out_count, const char *t
     return 1;
 }
 
+/* 리터럴 type/text를 out_items 동적 배열 뒤에 복제해 붙이고 성공 시 1을 반환한다. */
 static int append_literal(LiteralValue **out_items, size_t *out_count, ValueType type, const char *text) {
     LiteralValue *grown = (LiteralValue *)realloc(*out_items, sizeof(LiteralValue) * (*out_count + 1));
     if (grown == NULL) {
@@ -118,6 +130,7 @@ static int append_literal(LiteralValue **out_items, size_t *out_count, ValueType
     return 1;
 }
 
+/* 현재 토큰이 식별자면 out_text에 복제하고, 아니면 parse error를 반환한다. */
 static int parse_identifier(Parser *parser, char **out_text, char *errbuf, size_t errbuf_size) {
     if (parser_peek(parser)->type != TOKEN_IDENTIFIER) {
         set_error(errbuf, errbuf_size, "PARSE ERROR: expected identifier");
@@ -132,6 +145,7 @@ static int parse_identifier(Parser *parser, char **out_text, char *errbuf, size_
     return STATUS_OK;
 }
 
+/* 현재 토큰이 문자열/숫자 리터럴이면 out_value에 복제하고 상태를 반환한다. */
 static int parse_literal(Parser *parser, LiteralValue *out_value, char *errbuf, size_t errbuf_size) {
     const Token *token = parser_peek(parser);
 
@@ -161,6 +175,7 @@ static int parse_literal(Parser *parser, LiteralValue *out_value, char *errbuf, 
     return STATUS_PARSE_ERROR;
 }
 
+/* `a, b, c` 형태 식별자 목록을 읽어 out_items/out_count에 채운다. */
 static int parse_identifier_list(Parser *parser, char ***out_items, size_t *out_count,
                                  char *errbuf, size_t errbuf_size) {
     char *identifier = NULL;
@@ -204,6 +219,7 @@ static int parse_identifier_list(Parser *parser, char ***out_items, size_t *out_
     return STATUS_OK;
 }
 
+/* `(1, 'x')` 안쪽의 리터럴 목록을 읽어 out_items/out_count에 채운다. */
 static int parse_literal_list(Parser *parser, LiteralValue **out_items, size_t *out_count,
                               char *errbuf, size_t errbuf_size) {
     LiteralValue literal;
@@ -251,6 +267,7 @@ static int parse_literal_list(Parser *parser, LiteralValue **out_items, size_t *
     return STATUS_OK;
 }
 
+/* 선택적으로 붙는 `WHERE column = literal` 절을 읽어 out_clause에 채운다. */
 static int parse_where_clause(Parser *parser, WhereClause *out_clause, char *errbuf, size_t errbuf_size) {
     int status;
 
@@ -282,6 +299,7 @@ static int parse_where_clause(Parser *parser, WhereClause *out_clause, char *err
     return STATUS_OK;
 }
 
+/* INSERT 문 토큰 시퀀스를 읽어 out_stmt->insert_stmt를 완성한다. */
 static int parse_insert(Parser *parser, Statement *out_stmt, char *errbuf, size_t errbuf_size) {
     InsertStatement *stmt = &out_stmt->insert_stmt;
     int status;
@@ -340,6 +358,7 @@ static int parse_insert(Parser *parser, Statement *out_stmt, char *errbuf, size_
     return STATUS_OK;
 }
 
+/* SELECT 문 토큰 시퀀스를 읽어 projection/table/where 정보를 out_stmt에 채운다. */
 static int parse_select(Parser *parser, Statement *out_stmt, char *errbuf, size_t errbuf_size) {
     SelectStatement *stmt = &out_stmt->select_stmt;
     int status;
@@ -377,6 +396,7 @@ static int parse_select(Parser *parser, Statement *out_stmt, char *errbuf, size_
     return STATUS_OK;
 }
 
+/* cursor 이후 다음 statement 하나만 파싱해 out_stmt에 채우고 cursor를 앞으로 이동시킨다. */
 int parse_next_statement(const TokenArray *tokens, size_t *cursor,
                          Statement *out_stmt, char *errbuf, size_t errbuf_size) {
     Parser parser;
@@ -430,6 +450,7 @@ int parse_next_statement(const TokenArray *tokens, size_t *cursor,
     return STATUS_OK;
 }
 
+/* tokens 전체가 정확히 하나의 문장일 때만 파싱을 허용하고 out_stmt에 AST를 채운다. */
 int parse_statement(const TokenArray *tokens, Statement *out_stmt, char *errbuf, size_t errbuf_size) {
     size_t cursor = 0;
     int status;
@@ -452,6 +473,7 @@ int parse_statement(const TokenArray *tokens, Statement *out_stmt, char *errbuf,
     return STATUS_OK;
 }
 
+/* stmt 타입에 따라 내부 동적 메모리를 해제해 AST 하나를 정리한다. */
 void free_statement(Statement *stmt) {
     if (stmt == NULL) {
         return;
@@ -481,4 +503,3 @@ void free_statement(Statement *stmt) {
         stmt->select_stmt.where_clause.value.text = NULL;
     }
 }
-

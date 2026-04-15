@@ -4,11 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* left와 right 중 더 큰 width 값을 반환해 표 열 폭 계산에 사용한다. */
 static size_t max_size(size_t left, size_t right)
 {
     return left > right ? left : right;
 }
 
+/* widths와 column_count를 받아 ASCII 표의 구분선 한 줄을 stdout에 출력한다. */
 static void print_separator(const size_t *widths, size_t column_count)
 {
     size_t column_index;
@@ -25,6 +27,7 @@ static void print_separator(const size_t *widths, size_t column_count)
     putchar('\n');
 }
 
+/* result를 INSERT 요약 또는 SELECT 표 형태로 렌더링해 stdout에 출력한다. */
 void print_exec_result(const ExecResult *result)
 {
     size_t *widths;

@@ -8,23 +8,30 @@
 
 #ifdef _WIN32
 #include <direct.h>
+/* 테스트용 디렉터리를 생성하기 위한 Windows mkdir 래퍼 매크로다. */
 #define MKDIR(path) _mkdir(path)
+/* 테스트용 디렉터리를 제거하기 위한 Windows rmdir 래퍼 매크로다. */
 #define RMDIR(path) _rmdir(path)
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+/* 테스트용 디렉터리를 생성하기 위한 POSIX mkdir 래퍼 매크로다. */
 #define MKDIR(path) mkdir((path), 0777)
+/* 테스트용 디렉터리를 제거하기 위한 POSIX rmdir 래퍼 매크로다. */
 #define RMDIR(path) rmdir(path)
 #endif
 
+/* 하나라도 실패한 테스트가 있었는지 기록하는 전역 플래그다. */
 static int tests_failed = 0;
 
+/* 실패 메시지와 파일/줄 번호를 기록해 어떤 storage 검증이 깨졌는지 보여준다. */
 static void fail_test(const char *message, const char *file, int line) {
     fprintf(stderr, "TEST FAILED at %s:%d: %s\n", file, line, message);
     tests_failed = 1;
 }
 
+/* expr가 거짓이면 실패 위치를 기록하고 현재 테스트 함수를 즉시 종료한다. */
 #define ASSERT_TRUE(expr) do { \
     if (!(expr)) { \
         fail_test(#expr, __FILE__, __LINE__); \
@@ -32,6 +39,7 @@ static void fail_test(const char *message, const char *file, int line) {
     } \
 } while (0)
 
+/* 두 문자열이 다르면 기대값과 실제값을 포함한 메시지로 현재 테스트를 실패시킨다. */
 #define ASSERT_STREQ(expected, actual) do { \
     if (strcmp((expected), (actual)) != 0) { \
         char _message[512]; \
@@ -41,10 +49,12 @@ static void fail_test(const char *message, const char *file, int line) {
     } \
 } while (0)
 
+/* path가 존재하면 삭제를 시도해 테스트 DB fixture를 깨끗하게 만든다. */
 static void remove_if_exists(const char *path) {
     remove(path);
 }
 
+/* path 디렉터리가 없으면 생성해 storage 테스트용 디렉터리를 준비한다. */
 static void ensure_directory(const char *path) {
     if (MKDIR(path) != 0 && errno != EEXIST) {
         fprintf(stderr, "Failed to create directory %s: %s\n", path, strerror(errno));
@@ -52,6 +62,7 @@ static void ensure_directory(const char *path) {
     }
 }
 
+/* storage 테스트에서 만든 schema/data 파일과 디렉터리를 제거한다. */
 static void cleanup_test_db(void) {
     remove_if_exists("tests/tmp_storage_db/users.schema");
     remove_if_exists("tests/tmp_storage_db/users.data");
@@ -59,6 +70,7 @@ static void cleanup_test_db(void) {
     RMDIR("tests/tmp_storage_db");
 }
 
+/* users.schema fixture를 생성해 storage 테스트가 동일한 스키마를 공유하게 한다. */
 static void prepare_test_db(void) {
     FILE *schema_file;
 
@@ -76,6 +88,7 @@ static void prepare_test_db(void) {
     fclose(schema_file);
 }
 
+/* path 파일 전체를 읽어 문자열로 반환해 raw data 파일 직렬화 결과를 검증한다. */
 static char *read_entire_file(const char *path) {
     FILE *file;
     long length;
@@ -115,6 +128,7 @@ static char *read_entire_file(const char *path) {
     return buffer;
 }
 
+/* schema 파일 로딩과 column index 조회가 정상 동작하는지 검증한다. */
 static void test_load_table_schema_success(void) {
     TableSchema schema = {0};
     char errbuf[256] = {0};
@@ -133,6 +147,7 @@ static void test_load_table_schema_success(void) {
     free_table_schema(&schema);
 }
 
+/* schema에 중복 컬럼명이 있으면 오류가 발생하는지 검증한다. */
 static void test_duplicate_schema_column_error(void) {
     FILE *schema_file;
     TableSchema schema = {0};
@@ -154,6 +169,7 @@ static void test_duplicate_schema_column_error(void) {
     free_table_schema(&schema);
 }
 
+/* append 시 파이프, 개행, 백슬래시가 escape 규칙대로 직렬화되는지 확인한다. */
 static void test_append_row_escapes_fields(void) {
     Row row = {0};
     char *values[3];
@@ -176,6 +192,7 @@ static void test_append_row_escapes_fields(void) {
     free(content);
 }
 
+/* 저장된 escape row가 다시 읽힐 때 원래 문자열로 정확히 복원되는지 검증한다. */
 static void test_read_rows_round_trip_escape_sequences(void) {
     Row row = {0};
     Row *rows = NULL;
@@ -202,6 +219,7 @@ static void test_read_rows_round_trip_escape_sequences(void) {
     free_rows(rows, row_count);
 }
 
+/* data 파일이 없어도 빈 테이블로 간주해 성공적으로 읽히는지 검증한다. */
 static void test_read_missing_data_file_as_empty_table(void) {
     Row *rows = NULL;
     size_t row_count = 0U;
@@ -215,6 +233,7 @@ static void test_read_missing_data_file_as_empty_table(void) {
     ASSERT_TRUE(row_count == 0U);
 }
 
+/* 비어 있는 data 파일이 row_count 0인 정상 상태로 처리되는지 확인한다. */
 static void test_read_empty_data_file(void) {
     FILE *data_file;
     Row *rows = NULL;
@@ -235,6 +254,7 @@ static void test_read_empty_data_file(void) {
     ASSERT_TRUE(row_count == 0U);
 }
 
+/* schema보다 짧은 row는 빈 문자열로 padding되어 읽히는지 검증한다. */
 static void test_short_row_is_padded_for_new_schema_column(void) {
     FILE *data_file;
     Row *rows = NULL;
@@ -262,6 +282,7 @@ static void test_short_row_is_padded_for_new_schema_column(void) {
     free_rows(rows, row_count);
 }
 
+/* schema보다 긴 row는 뒤쪽 필드가 잘려 현재 schema 길이에 맞춰지는지 검증한다. */
 static void test_long_row_is_truncated_for_removed_schema_column(void) {
     FILE *data_file;
     Row *rows = NULL;
@@ -289,6 +310,7 @@ static void test_long_row_is_truncated_for_removed_schema_column(void) {
     free_rows(rows, row_count);
 }
 
+/* 잘못된 escape 시퀀스가 포함된 row는 storage 오류로 감지되는지 검증한다. */
 static void test_malformed_escape_row_still_errors(void) {
     FILE *data_file;
     Row *rows = NULL;
@@ -312,6 +334,7 @@ static void test_malformed_escape_row_still_errors(void) {
     ASSERT_TRUE(row_count == 0U);
 }
 
+/* storage 관련 테스트를 전부 실행하고 실패 플래그에 맞는 종료 코드를 반환한다. */
 int main(void) {
     test_load_table_schema_success();
     test_duplicate_schema_column_error();

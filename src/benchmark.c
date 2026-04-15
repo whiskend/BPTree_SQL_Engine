@@ -13,13 +13,16 @@
 
 #ifdef _WIN32
 #include <direct.h>
+/* Windows 환경에서 디렉터리 생성 함수를 공통 이름 MKDIR로 맞춘다. */
 #define MKDIR(path) _mkdir(path)
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
+/* POSIX 환경에서 디렉터리 생성 함수를 공통 이름 MKDIR로 맞춘다. */
 #define MKDIR(path) mkdir((path), 0777)
 #endif
 
+/* 단일 메시지를 errbuf에 복사해 벤치마크 모듈 오류 문자열로 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *message)
 {
     if (errbuf != NULL && errbuf_size > 0U) {
@@ -27,6 +30,7 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *message)
     }
 }
 
+/* CLOCK_MONOTONIC 기준 현재 시각을 밀리초 단위 double 값으로 반환한다. */
 static double now_ms(void)
 {
     struct timespec ts;
@@ -35,6 +39,7 @@ static double now_ms(void)
     return ((double)ts.tv_sec * 1000.0) + ((double)ts.tv_nsec / 1000000.0);
 }
 
+/* path 디렉터리가 없으면 생성하고, 생성/존재 여부를 STATUS 코드로 반환한다. */
 static int ensure_directory(const char *path, char *errbuf, size_t errbuf_size)
 {
     if (MKDIR(path) != 0 && errno != EEXIST) {
@@ -48,6 +53,7 @@ static int ensure_directory(const char *path, char *errbuf, size_t errbuf_size)
     return STATUS_OK;
 }
 
+/* 벤치마크 전용 schema/data 파일을 초기화해 id,name,age 구조의 테이블을 준비한다. */
 static int ensure_benchmark_schema(const char *db_dir,
                                    const char *table_name,
                                    char *errbuf,
@@ -86,6 +92,7 @@ static int ensure_benchmark_schema(const char *db_dir,
     return STATUS_OK;
 }
 
+/* ctx/table_name에 대해 row_count건 INSERT AST를 반복 실행해 대량 데이터를 적재한다. */
 static int benchmark_bulk_insert(ExecutionContext *ctx,
                                  const char *table_name,
                                  size_t row_count,
@@ -127,6 +134,7 @@ static int benchmark_bulk_insert(ExecutionContext *ctx,
     return STATUS_OK;
 }
 
+/* id 조건 SELECT를 probe_count번 실행해 총 소요 시간을 out_total_ms에 기록한다. */
 static int benchmark_id_selects(ExecutionContext *ctx,
                                 const char *table_name,
                                 size_t row_count,
@@ -174,6 +182,7 @@ static int benchmark_id_selects(ExecutionContext *ctx,
     return STATUS_OK;
 }
 
+/* name 조건 full-scan SELECT를 probe_count번 실행해 총 소요 시간을 out_total_ms에 기록한다. */
 static int benchmark_non_id_selects(ExecutionContext *ctx,
                                     const char *table_name,
                                     size_t row_count,
@@ -221,6 +230,11 @@ static int benchmark_non_id_selects(ExecutionContext *ctx,
     return STATUS_OK;
 }
 
+/*
+ * 전체 벤치마크 오케스트레이션 함수다.
+ * DB 디렉터리와 테이블 이름, insert/조회 횟수를 받아 데이터를 만들고 성능을 측정한 뒤
+ * out_report에 총합/평균/배수를 채워 반환한다.
+ */
 int run_benchmark(const char *db_dir,
                   const char *table_name,
                   size_t row_count,

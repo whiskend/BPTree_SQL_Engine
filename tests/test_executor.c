@@ -10,24 +10,31 @@
 
 #ifdef _WIN32
 #include <direct.h>
+/* 테스트용 디렉터리를 생성하기 위한 Windows mkdir 래퍼 매크로다. */
 #define MKDIR(path) _mkdir(path)
+/* 테스트용 디렉터리를 제거하기 위한 Windows rmdir 래퍼 매크로다. */
 #define RMDIR(path) _rmdir(path)
 #else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+/* 테스트용 디렉터리를 생성하기 위한 POSIX mkdir 래퍼 매크로다. */
 #define MKDIR(path) mkdir((path), 0777)
+/* 테스트용 디렉터리를 제거하기 위한 POSIX rmdir 래퍼 매크로다. */
 #define RMDIR(path) rmdir(path)
 #endif
 
+/* 하나라도 실패한 테스트가 있었는지 기록하는 전역 플래그다. */
 static int tests_failed = 0;
 
+/* 실패 메시지와 파일/줄 번호를 출력해 어떤 assertion이 깨졌는지 기록한다. */
 static void fail_test(const char *message, const char *file, int line)
 {
     fprintf(stderr, "TEST FAILED at %s:%d: %s\n", file, line, message);
     tests_failed = 1;
 }
 
+/* expr가 거짓이면 실패 위치를 기록하고 현재 테스트 함수를 즉시 종료한다. */
 #define ASSERT_TRUE(expr) do { \
     if (!(expr)) { \
         fail_test(#expr, __FILE__, __LINE__); \
@@ -35,6 +42,7 @@ static void fail_test(const char *message, const char *file, int line)
     } \
 } while (0)
 
+/* 두 문자열이 다르면 기대값과 실제값을 포함한 메시지로 현재 테스트를 실패시킨다. */
 #define ASSERT_STREQ(expected, actual) do { \
     if (strcmp((expected), (actual)) != 0) { \
         char _message[512]; \
@@ -44,11 +52,13 @@ static void fail_test(const char *message, const char *file, int line)
     } \
 } while (0)
 
+/* path가 존재하면 삭제를 시도해 테스트 fixture를 깨끗한 상태로 만든다. */
 static void remove_if_exists(const char *path)
 {
     remove(path);
 }
 
+/* text의 복사본을 heap에 만들고 반환하며, 실패 시 테스트를 즉시 종료한다. */
 static char *dup_string(const char *text)
 {
     size_t length = strlen(text) + 1U;
@@ -63,6 +73,7 @@ static char *dup_string(const char *text)
     return copy;
 }
 
+/* path 디렉터리가 없으면 생성해 테스트 DB 경로를 준비한다. */
 static void ensure_directory(const char *path)
 {
     if (MKDIR(path) != 0 && errno != EEXIST) {
@@ -71,6 +82,7 @@ static void ensure_directory(const char *path)
     }
 }
 
+/* executor 테스트가 사용하는 schema/data 파일과 디렉터리를 정리한다. */
 static void cleanup_test_db(void)
 {
     remove_if_exists("build/test_executor_db/users.schema");
@@ -80,6 +92,7 @@ static void cleanup_test_db(void)
     RMDIR("build/test_executor_db");
 }
 
+/* auto-id가 붙는 users 테이블 schema를 fixture로 생성한다. */
 static void prepare_users_schema(void)
 {
     FILE *schema_file;
@@ -98,6 +111,7 @@ static void prepare_users_schema(void)
     fclose(schema_file);
 }
 
+/* id 컬럼이 없는 products 테이블 schema를 fixture로 생성한다. */
 static void prepare_products_schema(void)
 {
     FILE *schema_file;
@@ -116,6 +130,7 @@ static void prepare_products_schema(void)
     fclose(schema_file);
 }
 
+/* path 파일 전체를 읽어 NUL 종료 문자열로 반환해 저장 결과 검증에 사용한다. */
 static char *read_entire_file(const char *path)
 {
     FILE *file;
@@ -162,6 +177,7 @@ static char *read_entire_file(const char *path)
     return buffer;
 }
 
+/* 테스트용 INSERT AST를 직접 구성해 parser를 거치지 않고 executor만 검증할 수 있게 한다. */
 static Statement make_insert_stmt(const char *table_name,
                                   const char **columns, size_t column_count,
                                   const char **values, size_t value_count)
@@ -200,6 +216,7 @@ static Statement make_insert_stmt(const char *table_name,
     return stmt;
 }
 
+/* 테스트용 SELECT AST를 직접 구성해 WHERE/projection/index 경로를 세밀하게 제어한다. */
 static Statement make_select_stmt(const char *table_name,
                                   int select_all,
                                   const char **columns, size_t column_count,
@@ -237,6 +254,7 @@ static Statement make_select_stmt(const char *table_name,
     return stmt;
 }
 
+/* build/test_executor_db를 가리키는 ExecutionContext를 초기화해 반환한다. */
 static ExecutionContext create_context(void)
 {
     ExecutionContext ctx = {0};
@@ -250,6 +268,7 @@ static ExecutionContext create_context(void)
     return ctx;
 }
 
+/* id 컬럼이 있는 테이블에서 VALUES INSERT 시 id가 자동 생성되고 파일에 기록되는지 검증한다. */
 static void test_auto_id_insert_success(void)
 {
     const char *values[] = {"Alice", "20"};
@@ -278,6 +297,7 @@ static void test_auto_id_insert_success(void)
     free_execution_context(&ctx);
 }
 
+/* column list INSERT에서도 generated id와 컬럼 재배치가 올바른지 검증한다. */
 static void test_column_list_auto_id_insert_success(void)
 {
     const char *columns[] = {"age", "name"};
@@ -305,6 +325,7 @@ static void test_column_list_auto_id_insert_success(void)
     free_execution_context(&ctx);
 }
 
+/* auto-id 테이블에서 사용자가 id 컬럼을 직접 지정하면 EXEC ERROR가 나는지 확인한다. */
 static void test_explicit_id_insert_fails(void)
 {
     const char *columns[] = {"id", "name"};
@@ -326,6 +347,7 @@ static void test_explicit_id_insert_fails(void)
     free_execution_context(&ctx);
 }
 
+/* users 테이블에 두 건을 미리 넣어 이후 SELECT 테스트용 fixture를 만든다. */
 static void seed_users_with_auto_ids(ExecutionContext *ctx)
 {
     const char *values1[] = {"Alice", "20"};
@@ -351,6 +373,7 @@ static void seed_users_with_auto_ids(ExecutionContext *ctx)
     free_statement(&stmt2);
 }
 
+/* WHERE id = ? 조회가 B+Tree 인덱스를 타고 used_index를 1로 남기는지 검증한다. */
 static void test_select_where_id_uses_index(void)
 {
     Statement stmt;
@@ -374,6 +397,7 @@ static void test_select_where_id_uses_index(void)
     free_execution_context(&ctx);
 }
 
+/* non-id 조건 조회는 기존 full scan 경로를 사용해 used_index가 0인지 확인한다. */
 static void test_select_where_non_id_uses_full_scan(void)
 {
     Statement stmt;
@@ -396,6 +420,7 @@ static void test_select_where_non_id_uses_full_scan(void)
     free_execution_context(&ctx);
 }
 
+/* canonical integer가 아닌 id literal은 의미 보존을 위해 인덱스를 타지 않는지 확인한다. */
 static void test_non_canonical_id_literal_does_not_use_index(void)
 {
     Statement stmt;
@@ -417,6 +442,7 @@ static void test_non_canonical_id_literal_does_not_use_index(void)
     free_execution_context(&ctx);
 }
 
+/* id 컬럼이 없는 테이블은 auto-id 없이 기존 INSERT/SELECT 동작을 유지하는지 본다. */
 static void test_non_indexed_table_keeps_existing_behavior(void)
 {
     const char *values[] = {"apple", "1000"};
@@ -447,6 +473,7 @@ static void test_non_indexed_table_keeps_existing_behavior(void)
     free_execution_context(&ctx);
 }
 
+/* executor 관련 테스트를 전부 실행하고 실패 플래그에 따라 종료 코드를 반환한다. */
 int main(void)
 {
     test_auto_id_insert_success();

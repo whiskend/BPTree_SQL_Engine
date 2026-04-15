@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* schema 모듈 내부에서 서식 문자열 기반 에러 메시지를 errbuf에 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...) {
     va_list args;
 
@@ -19,6 +20,7 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...) {
     va_end(args);
 }
 
+/* src를 heap에 복제한 새 문자열을 반환하고 src가 NULL이면 NULL을 반환한다. */
 static char *duplicate_string(const char *src) {
     size_t len;
     char *copy;
@@ -37,6 +39,7 @@ static char *duplicate_string(const char *src) {
     return copy;
 }
 
+/* db_dir, table_name, suffix를 이어 `.schema`/`.data`용 전체 파일 경로를 만든다. */
 static char *build_table_path(const char *db_dir, const char *table_name, const char *suffix) {
     size_t db_len;
     size_t table_len;
@@ -60,6 +63,7 @@ static char *build_table_path(const char *db_dir, const char *table_name, const 
     return path;
 }
 
+/* text 양끝 공백을 제자리에서 잘라 schema 컬럼명 정규화에 사용한다. */
 static void trim_in_place(char *text) {
     char *start;
     char *end;
@@ -86,6 +90,7 @@ static void trim_in_place(char *text) {
     text[trimmed_len] = '\0';
 }
 
+/* file에서 개행 전까지 한 줄을 읽어 out_line에 heap 문자열로 넘기고 상태를 반환한다. */
 static int read_line(FILE *file, char **out_line) {
     size_t capacity;
     size_t length;
@@ -143,6 +148,7 @@ static int read_line(FILE *file, char **out_line) {
     return 1;
 }
 
+/* items/count로 표현된 문자열 배열을 모두 해제한다. */
 static void free_string_array(char **items, size_t count) {
     size_t i;
 
@@ -156,6 +162,7 @@ static void free_string_array(char **items, size_t count) {
     free(items);
 }
 
+/* column_name을 복제해 columns 배열 끝에 추가하고 성공 여부를 0/1로 반환한다. */
 static int append_column(char ***columns, size_t *column_count, const char *column_name) {
     char *copy;
     char **grown;
@@ -177,6 +184,7 @@ static int append_column(char ***columns, size_t *column_count, const char *colu
     return 0;
 }
 
+/* `.schema` 파일을 읽어 out_schema에 테이블 이름과 컬럼 배열을 채우고 상태를 반환한다. */
 int load_table_schema(const char *db_dir, const char *table_name,
                       TableSchema *out_schema,
                       char *errbuf, size_t errbuf_size) {
@@ -283,6 +291,7 @@ int load_table_schema(const char *db_dir, const char *table_name,
     return 0;
 }
 
+/* schema에서 column_name이 위치한 인덱스를 찾아 반환하고 없으면 -1을 반환한다. */
 int schema_find_column_index(const TableSchema *schema, const char *column_name) {
     size_t i;
 
@@ -299,6 +308,7 @@ int schema_find_column_index(const TableSchema *schema, const char *column_name)
     return -1;
 }
 
+/* schema가 소유한 table_name과 columns 메모리를 모두 해제한다. */
 void free_table_schema(TableSchema *schema) {
     if (schema == NULL) {
         return;

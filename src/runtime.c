@@ -10,13 +10,15 @@
 #include "storage.h"
 #include "utils.h"
 
+/* 인덱스 빌드 중 현재 id 컬럼 위치, 최대 id, 빌드 대상 트리를 전달하는 상태 구조체다. */
 typedef struct {
-    int id_column_index;
-    BPTree *tree;
-    uint64_t max_id;
-    int saw_row;
+    int id_column_index; /* 스캔 중인 row에서 id 컬럼이 몇 번째인지 나타낸다. */
+    BPTree *tree;        /* 현재 row를 삽입할 대상 B+Tree다. */
+    uint64_t max_id;     /* 지금까지 본 가장 큰 stored id다. */
+    int saw_row;         /* 최소 한 행 이상 읽었는지 나타낸다. */
 } IdIndexBuildState;
 
+/* runtime 모듈 내부에서 서식 문자열 기반 에러 메시지를 errbuf에 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
 {
     va_list args;
@@ -30,6 +32,7 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
     va_end(args);
 }
 
+/* text를 heap 문자열로 복제해 반환하고 NULL이면 빈 문자열로 간주한다. */
 static char *dup_string(const char *text)
 {
     size_t length;
@@ -49,6 +52,7 @@ static char *dup_string(const char *text)
     return copy;
 }
 
+/* text가 leading zero 없는 양의 uint64 정수인지 검사하고 out_value에 파싱 결과를 넣는다. */
 static int parse_canonical_positive_uint64(const char *text, uint64_t *out_value)
 {
     size_t i;
@@ -85,6 +89,7 @@ static int parse_canonical_positive_uint64(const char *text, uint64_t *out_value
     return 1;
 }
 
+/* 저장된 id 문자열 text를 검증해 out_id에 숫자로 변환하고 상태 코드를 반환한다. */
 int parse_stored_id_value(const char *text,
                           uint64_t *out_id,
                           char *errbuf, size_t errbuf_size)
@@ -97,6 +102,7 @@ int parse_stored_id_value(const char *text,
     return STATUS_OK;
 }
 
+/* WHERE literal이 인덱스에 사용할 수 있는 canonical positive integer면 out_id를 채운다. */
 int try_parse_indexable_id_literal(const LiteralValue *literal,
                                    uint64_t *out_id)
 {
@@ -118,6 +124,7 @@ int try_parse_indexable_id_literal(const LiteralValue *literal,
     return 1;
 }
 
+/* scan_table_rows_with_offsets 콜백으로 호출돼 row의 id를 tree에 삽입하며 최대 id를 추적한다. */
 static int build_id_index_callback(const Row *row,
                                    long row_offset,
                                    void *user_data,
@@ -161,6 +168,7 @@ static int build_id_index_callback(const Row *row,
     return 0;
 }
 
+/* 기존 data 파일을 스캔해 id 인덱스를 재구성하고 다음 auto id를 계산한다. */
 int build_id_index_for_table(const char *db_dir,
                              const TableSchema *schema,
                              int id_column_index,
@@ -209,6 +217,7 @@ int build_id_index_for_table(const char *db_dir,
     return STATUS_OK;
 }
 
+/* db_dir 기준으로 out_ctx를 빈 runtime cache 상태로 초기화한다. */
 int init_execution_context(const char *db_dir,
                            ExecutionContext *out_ctx,
                            char *errbuf, size_t errbuf_size)
@@ -231,6 +240,7 @@ int init_execution_context(const char *db_dir,
     return STATUS_OK;
 }
 
+/* ctx에서 table_name runtime을 찾아 재사용하거나 schema/index를 새로 로드해 out_table에 넘긴다. */
 int get_or_load_table_runtime(ExecutionContext *ctx,
                               const char *table_name,
                               TableRuntime **out_table,
@@ -317,6 +327,7 @@ int get_or_load_table_runtime(ExecutionContext *ctx,
     return STATUS_OK;
 }
 
+/* ctx가 보유한 모든 table runtime과 그 안의 schema/B+Tree 메모리를 해제한다. */
 void free_execution_context(ExecutionContext *ctx)
 {
     size_t i;

@@ -4,17 +4,23 @@
 
 #include "parser.h"
 
+/* parser 테스트에서 기대하는 상태 코드 집합이다. */
 enum {
+    /* 토큰화와 파싱이 정상 완료됐음을 뜻한다. */
     STATUS_OK = 0,
+    /* 파싱 전에 lexer 단계에서 실패했음을 뜻한다. */
     STATUS_LEX_ERROR = 3,
+    /* 토큰은 만들었지만 SQL 문법 규칙에 맞지 않아 파싱이 실패했음을 뜻한다. */
     STATUS_PARSE_ERROR = 4
 };
 
+/* message를 stderr에 출력하고 테스트를 종료한다. */
 static void fail(const char *message) {
     fprintf(stderr, "test_parser failed: %s\n", message);
     exit(1);
 }
 
+/* 정수 expected와 actual이 같은지 검사하고 다르면 실패시킨다. */
 static void assert_int_eq(int expected, int actual, const char *message) {
     if (expected != actual) {
         fprintf(stderr, "test_parser failed: %s (expected=%d actual=%d)\n", message, expected, actual);
@@ -22,6 +28,7 @@ static void assert_int_eq(int expected, int actual, const char *message) {
     }
 }
 
+/* size_t expected와 actual이 같은지 검사해 파싱 결과 개수를 검증한다. */
 static void assert_size_eq(size_t expected, size_t actual, const char *message) {
     if (expected != actual) {
         fprintf(stderr, "test_parser failed: %s (expected=%zu actual=%zu)\n", message, expected, actual);
@@ -29,6 +36,7 @@ static void assert_size_eq(size_t expected, size_t actual, const char *message) 
     }
 }
 
+/* 문자열 expected와 actual이 같은지 검사해 AST 내부 텍스트를 검증한다. */
 static void assert_str_eq(const char *expected, const char *actual, const char *message) {
     if (strcmp(expected, actual) != 0) {
         fprintf(stderr, "test_parser failed: %s (expected=%s actual=%s)\n", message, expected, actual);
@@ -36,6 +44,7 @@ static void assert_str_eq(const char *expected, const char *actual, const char *
     }
 }
 
+/* sql을 먼저 tokenize한 뒤 parse_statement까지 수행해 단일 statement AST를 만든다. */
 static int tokenize_and_parse(const char *sql, Statement *stmt, char *errbuf, size_t errbuf_size) {
     TokenArray tokens = {0};
     int status = tokenize_sql(sql, &tokens, errbuf, errbuf_size);
@@ -48,6 +57,7 @@ static int tokenize_and_parse(const char *sql, Statement *stmt, char *errbuf, si
     return status;
 }
 
+/* column list 없는 INSERT가 올바른 AST와 literal 타입으로 파싱되는지 검증한다. */
 static void test_insert_without_column_list(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -66,6 +76,7 @@ static void test_insert_without_column_list(void) {
     free_statement(&stmt);
 }
 
+/* projection 컬럼과 WHERE가 있는 SELECT가 기대한 AST 구조로 파싱되는지 검증한다. */
 static void test_select_column_list_with_where(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -83,6 +94,7 @@ static void test_select_column_list_with_where(void) {
     free_statement(&stmt);
 }
 
+/* 하나의 토큰 스트림에서 parse_next_statement가 여러 SQL을 순서대로 분리하는지 확인한다. */
 static void test_parse_next_statement_handles_multiple_sqls(void) {
     TokenArray tokens = {0};
     Statement stmt = {0};
@@ -115,6 +127,7 @@ static void test_parse_next_statement_handles_multiple_sqls(void) {
     free_token_array(&tokens);
 }
 
+/* projection 없는 SELECT가 PARSE ERROR로 거절되는지 검증한다. */
 static void test_select_missing_projection_fails(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -127,6 +140,7 @@ static void test_select_missing_projection_fails(void) {
     }
 }
 
+/* INSERT 문에서 INTO가 빠졌을 때 적절한 parse error가 나는지 확인한다. */
 static void test_insert_missing_into_fails(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -139,6 +153,7 @@ static void test_insert_missing_into_fails(void) {
     }
 }
 
+/* SELECT 문에서 FROM이 빠졌을 때 parser가 오류를 보고하는지 검증한다. */
 static void test_missing_from_fails(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -151,6 +166,7 @@ static void test_missing_from_fails(void) {
     }
 }
 
+/* WHERE 절에서 '=' 가 빠졌을 때 parser가 문법 오류를 내는지 확인한다. */
 static void test_missing_equal_in_where_fails(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -163,6 +179,7 @@ static void test_missing_equal_in_where_fails(void) {
     }
 }
 
+/* INSERT의 column list 구두점 오류가 모두 PARSE ERROR로 잡히는지 검증한다. */
 static void test_missing_comma_or_paren_fails(void) {
     Statement stmt;
     char errbuf[256] = {0};
@@ -175,6 +192,7 @@ static void test_missing_comma_or_paren_fails(void) {
                   "missing right paren should fail");
 }
 
+/* parser 단위 테스트를 모두 실행하고 통과 시 OK를 출력한다. */
 int main(void) {
     test_insert_without_column_list();
     test_select_column_list_with_where();

@@ -7,21 +7,25 @@
 
 #include "utils.h"
 
+/* lexer.c 내부에서만 쓰는 상태 코드 별칭이다. */
 enum {
-    STATUS_OK = 0,
-    STATUS_LEX_ERROR = 3
+    STATUS_OK = 0,        /* 토큰화가 정상적으로 끝났음을 뜻한다. */
+    STATUS_LEX_ERROR = 3  /* 토큰화 단계에서 오류가 났음을 뜻한다. */
 };
 
+/* 단일 message를 errbuf에 복사해 lexer 오류 문자열을 기록한다. */
 static void set_error(char *errbuf, size_t errbuf_size, const char *message) {
     if (errbuf != NULL && errbuf_size > 0) {
         snprintf(errbuf, errbuf_size, "%s", message);
     }
 }
 
+/* 문자 a와 b를 대소문자 무시 기준으로 비교해 같으면 1을 반환한다. */
 static int chars_equal_ignore_case(char a, char b) {
     return toupper((unsigned char)a) == toupper((unsigned char)b);
 }
 
+/* lhs와 rhs를 대소문자 무시 기준으로 끝까지 비교해 완전히 같으면 1을 반환한다. */
 static int strings_equal_ignore_case(const char *lhs, const char *rhs) {
     size_t i = 0;
 
@@ -35,6 +39,7 @@ static int strings_equal_ignore_case(const char *lhs, const char *rhs) {
     return lhs[i] == '\0' && rhs[i] == '\0';
 }
 
+/* 식별자 text가 예약어면 해당 키워드 토큰 타입을, 아니면 TOKEN_IDENTIFIER를 반환한다. */
 static TokenType keyword_type(const char *text) {
     if (strings_equal_ignore_case(text, "INSERT")) {
         return TOKEN_INSERT;
@@ -57,6 +62,7 @@ static TokenType keyword_type(const char *text) {
     return TOKEN_IDENTIFIER;
 }
 
+/* type/text를 가진 새 토큰을 tokens 동적 배열 끝에 추가하고 상태 코드를 반환한다. */
 static int append_token(TokenArray *tokens, TokenType type, const char *text, char *errbuf, size_t errbuf_size) {
     Token *grown;
 
@@ -82,6 +88,7 @@ static int append_token(TokenArray *tokens, TokenType type, const char *text, ch
     return STATUS_OK;
 }
 
+/* start부터 length 길이만큼 복사한 새 NUL 종료 문자열을 heap에 만들어 반환한다. */
 static char *copy_range(const char *start, size_t length) {
     char *text = (char *)xmalloc(length + 1);
     memcpy(text, start, length);
@@ -89,6 +96,7 @@ static char *copy_range(const char *start, size_t length) {
     return text;
 }
 
+/* sql의 현재 index부터 식별자를 읽어 keyword/identifier 토큰 하나를 추가한다. */
 static int tokenize_identifier(const char *sql, size_t *index, TokenArray *tokens, char *errbuf, size_t errbuf_size) {
     size_t start = *index;
     char *text;
@@ -106,6 +114,7 @@ static int tokenize_identifier(const char *sql, size_t *index, TokenArray *token
     return status;
 }
 
+/* sql의 현재 index부터 숫자 리터럴을 읽어 TOKEN_NUMBER를 추가한다. */
 static int tokenize_number(const char *sql, size_t *index, TokenArray *tokens, char *errbuf, size_t errbuf_size) {
     size_t start = *index;
     int seen_dot = 0;
@@ -133,6 +142,7 @@ static int tokenize_number(const char *sql, size_t *index, TokenArray *tokens, c
     return status;
 }
 
+/* 동적 문자열 buffer 뒤에 문자 ch를 append하고 성공 시 1, 실패 시 0을 반환한다. */
 static int append_string_char(char **buffer, size_t *length, size_t *capacity, char ch) {
     char *grown;
 
@@ -151,6 +161,7 @@ static int append_string_char(char **buffer, size_t *length, size_t *capacity, c
     return 1;
 }
 
+/* 작은따옴표 문자열을 읽어 escape를 해석한 TOKEN_STRING 하나를 추가한다. */
 static int tokenize_string(const char *sql, size_t *index, TokenArray *tokens, char *errbuf, size_t errbuf_size) {
     char *buffer = NULL;
     size_t length = 0;
@@ -192,6 +203,7 @@ static int tokenize_string(const char *sql, size_t *index, TokenArray *tokens, c
     return STATUS_LEX_ERROR;
 }
 
+/* 단일 기호 문자 ch를 대응하는 punctuation token으로 바꿔 배열에 추가한다. */
 static int tokenize_symbol(char ch, TokenArray *tokens, char *errbuf, size_t errbuf_size) {
     TokenType type;
     char text[2];
@@ -226,6 +238,7 @@ static int tokenize_symbol(char ch, TokenArray *tokens, char *errbuf, size_t err
     return append_token(tokens, type, text, errbuf, errbuf_size);
 }
 
+/* sql 전체를 순회하며 TokenArray를 채우고 마지막에 EOF 토큰까지 붙여 상태를 반환한다. */
 int tokenize_sql(const char *sql, TokenArray *out_tokens, char *errbuf, size_t errbuf_size) {
     size_t index = 0;
     int status = STATUS_OK;
@@ -277,6 +290,7 @@ int tokenize_sql(const char *sql, TokenArray *out_tokens, char *errbuf, size_t e
     return STATUS_OK;
 }
 
+/* tokens가 소유한 각 token text와 items 배열 메모리를 모두 해제한다. */
 void free_token_array(TokenArray *tokens) {
     size_t i;
 
@@ -294,6 +308,7 @@ void free_token_array(TokenArray *tokens) {
     tokens->capacity = 0;
 }
 
+/* TokenType 값을 사람이 읽기 쉬운 디버그 문자열 이름으로 변환해 반환한다. */
 const char *token_type_name(TokenType type) {
     switch (type) {
         case TOKEN_EOF:
