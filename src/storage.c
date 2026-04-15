@@ -6,7 +6,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...) {
+#include "errors.h"
+
+typedef struct {
+    Row **rows;
+    size_t *row_count;
+} ReadAllRowsState;
+
+static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...)
+{
     va_list args;
 
     if (errbuf == NULL || errbuf_size == 0U) {
@@ -18,7 +26,8 @@ static void set_error(char *errbuf, size_t errbuf_size, const char *fmt, ...) {
     va_end(args);
 }
 
-static char *dup_string(const char *value) {
+static char *dup_string(const char *value)
+{
     size_t length;
     char *copy;
 
@@ -36,7 +45,8 @@ static char *dup_string(const char *value) {
     return copy;
 }
 
-static char *build_table_path(const char *db_dir, const char *table_name, const char *suffix) {
+static char *build_table_path(const char *db_dir, const char *table_name, const char *suffix)
+{
     size_t db_len;
     size_t table_len;
     size_t suffix_len;
@@ -59,7 +69,8 @@ static char *build_table_path(const char *db_dir, const char *table_name, const 
     return path;
 }
 
-static int read_line(FILE *file, char **out_line) {
+static int read_line(FILE *file, char **out_line)
+{
     size_t capacity;
     size_t length;
     char *buffer;
@@ -116,7 +127,8 @@ static int read_line(FILE *file, char **out_line) {
     return 1;
 }
 
-static int append_char(char **buffer, size_t *length, size_t *capacity, char ch) {
+static int append_char(char **buffer, size_t *length, size_t *capacity, char ch)
+{
     if (*buffer == NULL) {
         *capacity = 32U;
         *buffer = (char *)malloc(*capacity);
@@ -141,7 +153,8 @@ static int append_char(char **buffer, size_t *length, size_t *capacity, char ch)
     return 0;
 }
 
-static int push_field(char ***fields, size_t *field_count, char *field_value) {
+static int push_field(char ***fields, size_t *field_count, char *field_value)
+{
     char **grown;
 
     grown = (char **)realloc(*fields, (*field_count + 1U) * sizeof(char *));
@@ -155,20 +168,22 @@ static int push_field(char ***fields, size_t *field_count, char *field_value) {
     return 0;
 }
 
-static void free_field_array(char **fields, size_t field_count) {
+static void free_field_array(char **fields, size_t field_count)
+{
     size_t i;
 
     if (fields == NULL) {
         return;
     }
 
-    for (i = 0U; i < field_count; i++) {
+    for (i = 0U; i < field_count; ++i) {
         free(fields[i]);
     }
     free(fields);
 }
 
-static int normalize_field_count(char ***fields, size_t *field_count, size_t expected_count) {
+static int normalize_field_count(char ***fields, size_t *field_count, size_t expected_count)
+{
     size_t current_count;
     size_t i;
 
@@ -217,13 +232,14 @@ static int normalize_field_count(char ***fields, size_t *field_count, size_t exp
     return 0;
 }
 
-static char *escape_field(const char *value) {
+static char *escape_field(const char *value)
+{
     const char *src;
     size_t out_len;
     char *escaped;
     char *dst;
 
-    src = (value == NULL) ? "" : value;
+    src = value == NULL ? "" : value;
     out_len = 0U;
     while (*src != '\0') {
         if (*src == '\\' || *src == '|' || *src == '\n') {
@@ -239,7 +255,7 @@ static char *escape_field(const char *value) {
         return NULL;
     }
 
-    src = (value == NULL) ? "" : value;
+    src = value == NULL ? "" : value;
     dst = escaped;
     while (*src != '\0') {
         if (*src == '\\') {
@@ -261,7 +277,8 @@ static char *escape_field(const char *value) {
     return escaped;
 }
 
-static char *unescape_field(const char *value) {
+static char *unescape_field(const char *value)
+{
     size_t len;
     char *unescaped;
     size_t src_index;
@@ -278,7 +295,7 @@ static char *unescape_field(const char *value) {
     }
 
     dst_index = 0U;
-    for (src_index = 0U; src_index < len; src_index++) {
+    for (src_index = 0U; src_index < len; ++src_index) {
         if (value[src_index] != '\\') {
             unescaped[dst_index++] = value[src_index];
             continue;
@@ -306,13 +323,14 @@ static char *unescape_field(const char *value) {
     return unescaped;
 }
 
-static int split_escaped_row(const char *line, char ***out_fields, size_t *out_count) {
-    char **fields;
-    size_t field_count;
-    char *current_raw;
-    size_t current_len;
-    size_t current_capacity;
-    int escape_pending;
+static int split_escaped_row(const char *line, char ***out_fields, size_t *out_count)
+{
+    char **fields = NULL;
+    size_t field_count = 0U;
+    char *current_raw = NULL;
+    size_t current_len = 0U;
+    size_t current_capacity = 0U;
+    int escape_pending = 0;
     const char *cursor;
 
     if (line == NULL || out_fields == NULL || out_count == NULL) {
@@ -321,14 +339,8 @@ static int split_escaped_row(const char *line, char ***out_fields, size_t *out_c
 
     *out_fields = NULL;
     *out_count = 0U;
-    fields = NULL;
-    field_count = 0U;
-    current_raw = NULL;
-    current_len = 0U;
-    current_capacity = 0U;
-    escape_pending = 0;
 
-    for (cursor = line; *cursor != '\0'; cursor++) {
+    for (cursor = line; *cursor != '\0'; ++cursor) {
         if (escape_pending != 0) {
             if (append_char(&current_raw, &current_len, &current_capacity, *cursor) != 0) {
                 free_field_array(fields, field_count);
@@ -390,9 +402,8 @@ static int split_escaped_row(const char *line, char ***out_fields, size_t *out_c
     }
 
     {
-        char *field_value;
+        char *field_value = unescape_field(current_raw);
 
-        field_value = unescape_field(current_raw);
         if (field_value == NULL || push_field(&fields, &field_count, field_value) != 0) {
             free(field_value);
             free_field_array(fields, field_count);
@@ -407,114 +418,377 @@ static int split_escaped_row(const char *line, char ***out_fields, size_t *out_c
     return 0;
 }
 
+static int parse_line_into_row(const char *line,
+                               size_t expected_column_count,
+                               Row *out_row)
+{
+    char **fields = NULL;
+    size_t field_count = 0U;
+
+    if (line == NULL || out_row == NULL) {
+        return 1;
+    }
+
+    memset(out_row, 0, sizeof(*out_row));
+    if (split_escaped_row(line, &fields, &field_count) != 0) {
+        return 1;
+    }
+
+    if (normalize_field_count(&fields, &field_count, expected_column_count) != 0) {
+        free_field_array(fields, field_count);
+        return 1;
+    }
+
+    out_row->values = fields;
+    out_row->value_count = field_count;
+    return 0;
+}
+
+static int copy_row(const Row *src, Row *dst)
+{
+    size_t i;
+
+    if (src == NULL || dst == NULL) {
+        return 1;
+    }
+
+    memset(dst, 0, sizeof(*dst));
+    if (src->value_count == 0U) {
+        return 0;
+    }
+
+    dst->values = (char **)calloc(src->value_count, sizeof(char *));
+    if (dst->values == NULL) {
+        return 1;
+    }
+    dst->value_count = src->value_count;
+
+    for (i = 0U; i < src->value_count; ++i) {
+        dst->values[i] = dup_string(src->values[i]);
+        if (dst->values[i] == NULL) {
+            free_row(dst);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int read_all_rows_callback(const Row *row,
+                                  long row_offset,
+                                  void *user_data,
+                                  char *errbuf,
+                                  size_t errbuf_size)
+{
+    ReadAllRowsState *state = (ReadAllRowsState *)user_data;
+    Row *grown_rows;
+
+    (void)row_offset;
+
+    if (row == NULL || state == NULL || state->rows == NULL || state->row_count == NULL) {
+        set_error(errbuf, errbuf_size, "invalid read-all callback arguments");
+        return -1;
+    }
+
+    grown_rows = (Row *)realloc(*state->rows, (*state->row_count + 1U) * sizeof(Row));
+    if (grown_rows == NULL) {
+        set_error(errbuf, errbuf_size, "failed to allocate row array");
+        return -1;
+    }
+
+    *state->rows = grown_rows;
+    if (copy_row(row, &grown_rows[*state->row_count]) != 0) {
+        set_error(errbuf, errbuf_size, "failed to copy table row");
+        return -1;
+    }
+
+    *state->row_count += 1U;
+    return 0;
+}
+
 int ensure_table_data_file(const char *db_dir, const char *table_name,
-                           char *errbuf, size_t errbuf_size) {
+                           char *errbuf, size_t errbuf_size)
+{
     char *data_path;
     FILE *file;
 
     if (db_dir == NULL || table_name == NULL) {
         set_error(errbuf, errbuf_size, "invalid data file arguments");
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
     data_path = build_table_path(db_dir, table_name, ".data");
     if (data_path == NULL) {
         set_error(errbuf, errbuf_size, "failed to allocate data path for table '%s'", table_name);
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
     file = fopen(data_path, "ab");
     if (file == NULL) {
         set_error(errbuf, errbuf_size, "failed to open data file '%s': %s", data_path, strerror(errno));
         free(data_path);
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
     fclose(file);
     free(data_path);
-    return 0;
+    return STATUS_OK;
 }
 
-int append_row_to_table(const char *db_dir, const char *table_name,
-                        const Row *row,
-                        char *errbuf, size_t errbuf_size) {
+int append_row_to_table_with_offset(const char *db_dir, const char *table_name,
+                                    const Row *row, long *out_row_offset,
+                                    char *errbuf, size_t errbuf_size)
+{
     char *data_path;
     FILE *file;
     size_t i;
-    int status;
+    int status = STATUS_OK;
 
-    if (db_dir == NULL || table_name == NULL || row == NULL) {
+    if (out_row_offset != NULL) {
+        *out_row_offset = 0L;
+    }
+
+    if (db_dir == NULL || table_name == NULL || row == NULL || out_row_offset == NULL) {
         set_error(errbuf, errbuf_size, "invalid row append arguments");
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
     if (row->value_count == 0U) {
         set_error(errbuf, errbuf_size, "cannot append an empty row to table '%s'", table_name);
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
-    if (ensure_table_data_file(db_dir, table_name, errbuf, errbuf_size) != 0) {
-        return 1;
+    status = ensure_table_data_file(db_dir, table_name, errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        return status;
     }
 
     data_path = build_table_path(db_dir, table_name, ".data");
     if (data_path == NULL) {
         set_error(errbuf, errbuf_size, "failed to allocate data path for table '%s'", table_name);
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
-    file = fopen(data_path, "ab");
+    file = fopen(data_path, "ab+");
     if (file == NULL) {
         set_error(errbuf, errbuf_size, "failed to append data file '%s': %s", data_path, strerror(errno));
         free(data_path);
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
-    status = 0;
-    for (i = 0U; i < row->value_count; i++) {
-        char *escaped;
+    if (fseek(file, 0L, SEEK_END) != 0) {
+        set_error(errbuf, errbuf_size, "failed to seek to end of '%s'", data_path);
+        fclose(file);
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
 
-        escaped = escape_field(row->values[i]);
+    *out_row_offset = ftell(file);
+    if (*out_row_offset < 0L) {
+        set_error(errbuf, errbuf_size, "failed to determine row offset in '%s'", data_path);
+        fclose(file);
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    for (i = 0U; i < row->value_count; ++i) {
+        char *escaped = escape_field(row->values[i]);
+
         if (escaped == NULL) {
             set_error(errbuf, errbuf_size, "failed to escape row value for table '%s'", table_name);
-            status = 1;
+            status = STATUS_STORAGE_ERROR;
             break;
         }
 
         if ((i > 0U && fputc('|', file) == EOF) || fputs(escaped, file) == EOF) {
             set_error(errbuf, errbuf_size, "failed to write row data to '%s'", data_path);
             free(escaped);
-            status = 1;
+            status = STATUS_STORAGE_ERROR;
             break;
         }
 
         free(escaped);
     }
 
-    if (status == 0 && fputc('\n', file) == EOF) {
+    if (status == STATUS_OK && fputc('\n', file) == EOF) {
         set_error(errbuf, errbuf_size, "failed to terminate row in '%s'", data_path);
-        status = 1;
+        status = STATUS_STORAGE_ERROR;
     }
 
-    if (fclose(file) != 0 && status == 0) {
+    if (fclose(file) != 0 && status == STATUS_OK) {
         set_error(errbuf, errbuf_size, "failed to finalize data file '%s'", data_path);
-        status = 1;
+        status = STATUS_STORAGE_ERROR;
     }
 
     free(data_path);
     return status;
 }
 
+int append_row_to_table(const char *db_dir, const char *table_name,
+                        const Row *row,
+                        char *errbuf, size_t errbuf_size)
+{
+    long row_offset = 0L;
+
+    return append_row_to_table_with_offset(db_dir, table_name, row, &row_offset, errbuf, errbuf_size);
+}
+
+int scan_table_rows_with_offsets(const char *db_dir, const char *table_name,
+                                 size_t expected_column_count,
+                                 RowScanCallback callback,
+                                 void *user_data,
+                                 char *errbuf, size_t errbuf_size)
+{
+    char *data_path;
+    FILE *file;
+    size_t line_number = 0U;
+
+    if (db_dir == NULL || table_name == NULL || callback == NULL) {
+        set_error(errbuf, errbuf_size, "invalid row scan arguments");
+        return STATUS_STORAGE_ERROR;
+    }
+
+    data_path = build_table_path(db_dir, table_name, ".data");
+    if (data_path == NULL) {
+        set_error(errbuf, errbuf_size, "failed to allocate data path for table '%s'", table_name);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    file = fopen(data_path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            free(data_path);
+            return STATUS_OK;
+        }
+
+        set_error(errbuf, errbuf_size, "failed to open data file '%s': %s", data_path, strerror(errno));
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    while (1) {
+        Row row = {0};
+        char *line = NULL;
+        int read_status;
+        long row_offset = ftell(file);
+        int callback_status;
+
+        read_status = read_line(file, &line);
+        if (read_status == 0) {
+            break;
+        }
+        if (read_status < 0 || row_offset < 0L) {
+            set_error(errbuf, errbuf_size, "failed to read data file '%s'", data_path);
+            fclose(file);
+            free(data_path);
+            return STATUS_STORAGE_ERROR;
+        }
+
+        line_number += 1U;
+        if (parse_line_into_row(line, expected_column_count, &row) != 0) {
+            set_error(errbuf, errbuf_size, "malformed row %zu in table '%s'", line_number, table_name);
+            free(line);
+            fclose(file);
+            free(data_path);
+            return STATUS_STORAGE_ERROR;
+        }
+
+        callback_status = callback(&row, row_offset, user_data, errbuf, errbuf_size);
+        free_row(&row);
+        free(line);
+
+        if (callback_status == 1) {
+            break;
+        }
+        if (callback_status < 0) {
+            fclose(file);
+            free(data_path);
+            if (errbuf != NULL && errbuf_size > 0U && errbuf[0] == '\0') {
+                set_error(errbuf, errbuf_size, "row scan callback failed for table '%s'", table_name);
+            }
+            return STATUS_STORAGE_ERROR;
+        }
+    }
+
+    if (fclose(file) != 0) {
+        set_error(errbuf, errbuf_size, "failed to close data file '%s'", data_path);
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    free(data_path);
+    return STATUS_OK;
+}
+
+int read_row_at_offset(const char *db_dir, const char *table_name,
+                       long row_offset,
+                       size_t expected_column_count,
+                       Row *out_row,
+                       char *errbuf, size_t errbuf_size)
+{
+    char *data_path;
+    FILE *file;
+    char *line = NULL;
+    int read_status;
+
+    if (out_row != NULL) {
+        memset(out_row, 0, sizeof(*out_row));
+    }
+
+    if (db_dir == NULL || table_name == NULL || out_row == NULL || row_offset < 0L) {
+        set_error(errbuf, errbuf_size, "invalid row offset read arguments");
+        return STATUS_STORAGE_ERROR;
+    }
+
+    data_path = build_table_path(db_dir, table_name, ".data");
+    if (data_path == NULL) {
+        set_error(errbuf, errbuf_size, "failed to allocate data path for table '%s'", table_name);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    file = fopen(data_path, "rb");
+    if (file == NULL) {
+        set_error(errbuf, errbuf_size, "failed to open data file '%s': %s", data_path, strerror(errno));
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    if (fseek(file, row_offset, SEEK_SET) != 0) {
+        set_error(errbuf, errbuf_size, "failed to seek to row offset %ld in '%s'", row_offset, data_path);
+        fclose(file);
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    read_status = read_line(file, &line);
+    if (read_status <= 0) {
+        set_error(errbuf, errbuf_size, "failed to read row at offset %ld in '%s'", row_offset, data_path);
+        fclose(file);
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    if (parse_line_into_row(line, expected_column_count, out_row) != 0) {
+        set_error(errbuf, errbuf_size, "malformed row at offset %ld in table '%s'", row_offset, table_name);
+        free(line);
+        fclose(file);
+        free(data_path);
+        return STATUS_STORAGE_ERROR;
+    }
+
+    free(line);
+    fclose(file);
+    free(data_path);
+    return STATUS_OK;
+}
+
 int read_all_rows_from_table(const char *db_dir, const char *table_name,
                              size_t expected_column_count,
                              Row **out_rows, size_t *out_row_count,
-                             char *errbuf, size_t errbuf_size) {
-    char *data_path;
-    FILE *file;
-    Row *rows;
-    size_t row_count;
+                             char *errbuf, size_t errbuf_size)
+{
+    ReadAllRowsState state;
     int status;
-    size_t line_number;
 
     if (out_rows != NULL) {
         *out_rows = NULL;
@@ -525,115 +799,46 @@ int read_all_rows_from_table(const char *db_dir, const char *table_name,
 
     if (db_dir == NULL || table_name == NULL || out_rows == NULL || out_row_count == NULL) {
         set_error(errbuf, errbuf_size, "invalid row read arguments");
-        return 1;
+        return STATUS_STORAGE_ERROR;
     }
 
-    data_path = build_table_path(db_dir, table_name, ".data");
-    if (data_path == NULL) {
-        set_error(errbuf, errbuf_size, "failed to allocate data path for table '%s'", table_name);
-        return 1;
+    state.rows = out_rows;
+    state.row_count = out_row_count;
+
+    status = scan_table_rows_with_offsets(db_dir, table_name, expected_column_count,
+                                          read_all_rows_callback, &state,
+                                          errbuf, errbuf_size);
+    if (status != STATUS_OK) {
+        free_rows(*out_rows, *out_row_count);
+        *out_rows = NULL;
+        *out_row_count = 0U;
+        return status;
     }
 
-    file = fopen(data_path, "rb");
-    if (file == NULL) {
-        if (errno == ENOENT) {
-            free(data_path);
-            return 0;
-        }
-
-        set_error(errbuf, errbuf_size, "failed to open data file '%s': %s", data_path, strerror(errno));
-        free(data_path);
-        return 1;
-    }
-
-    rows = NULL;
-    row_count = 0U;
-    status = 0;
-    line_number = 0U;
-
-    while (1) {
-        char *line;
-        int read_status;
-
-        read_status = read_line(file, &line);
-        if (read_status == 0) {
-            break;
-        }
-        if (read_status < 0) {
-            set_error(errbuf, errbuf_size, "failed to read data file '%s'", data_path);
-            status = 1;
-            break;
-        }
-
-        line_number++;
-
-        {
-            char **fields;
-            size_t field_count;
-            Row *grown_rows;
-
-            if (split_escaped_row(line, &fields, &field_count) != 0) {
-                set_error(errbuf, errbuf_size, "malformed row %zu in table '%s'", line_number, table_name);
-                free(line);
-                status = 1;
-                break;
-            }
-
-            if (normalize_field_count(&fields, &field_count, expected_column_count) != 0) {
-                set_error(errbuf, errbuf_size,
-                          "failed to align row %zu in table '%s' with current schema",
-                          line_number, table_name);
-                free(line);
-                status = 1;
-                break;
-            }
-
-            grown_rows = (Row *)realloc(rows, (row_count + 1U) * sizeof(Row));
-            if (grown_rows == NULL) {
-                set_error(errbuf, errbuf_size, "failed to allocate row array for table '%s'", table_name);
-                free_field_array(fields, field_count);
-                free(line);
-                status = 1;
-                break;
-            }
-
-            rows = grown_rows;
-            rows[row_count].values = fields;
-            rows[row_count].value_count = field_count;
-            row_count += 1U;
-        }
-
-        free(line);
-    }
-
-    if (fclose(file) != 0 && status == 0) {
-        set_error(errbuf, errbuf_size, "failed to close data file '%s'", data_path);
-        status = 1;
-    }
-
-    free(data_path);
-
-    if (status != 0) {
-        free_rows(rows, row_count);
-        return 1;
-    }
-
-    *out_rows = rows;
-    *out_row_count = row_count;
-    return 0;
+    return STATUS_OK;
 }
 
-void free_rows(Row *rows, size_t row_count) {
+void free_row(Row *row)
+{
+    if (row == NULL) {
+        return;
+    }
+
+    free_field_array(row->values, row->value_count);
+    row->values = NULL;
+    row->value_count = 0U;
+}
+
+void free_rows(Row *rows, size_t row_count)
+{
     size_t i;
 
     if (rows == NULL) {
         return;
     }
 
-    for (i = 0U; i < row_count; i++) {
-        free_field_array(rows[i].values, rows[i].value_count);
-        rows[i].values = NULL;
-        rows[i].value_count = 0U;
+    for (i = 0U; i < row_count; ++i) {
+        free_row(&rows[i]);
     }
 
     free(rows);

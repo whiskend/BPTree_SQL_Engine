@@ -6,6 +6,7 @@
 #include "executor.h"
 #include "lexer.h"
 #include "parser.h"
+#include "runtime.h"
 #include "utils.h"
 
 static void print_error_message(const char *message)
@@ -23,6 +24,7 @@ int main(int argc, char **argv)
     TokenArray tokens = {0};
     Statement stmt = {0};
     ExecResult result = {0};
+    ExecutionContext ctx = {0};
     char errbuf[256] = {0};
     size_t cursor = 0;
     size_t executed_statement_count = 0;
@@ -60,6 +62,14 @@ int main(int argc, char **argv)
         return status;
     }
 
+    status = init_execution_context(options.db_dir, &ctx, errbuf, sizeof(errbuf));
+    if (status != STATUS_OK) {
+        print_error_message(errbuf);
+        free(sql_text);
+        free_token_array(&tokens);
+        return status;
+    }
+
     while (cursor < tokens.count && tokens.items[cursor].type == TOKEN_SEMICOLON) {
         ++cursor;
     }
@@ -68,15 +78,17 @@ int main(int argc, char **argv)
         status = parse_next_statement(&tokens, &cursor, &stmt, errbuf, sizeof(errbuf));
         if (status != STATUS_OK) {
             print_error_message(errbuf);
+            free_execution_context(&ctx);
             free(sql_text);
             free_token_array(&tokens);
             free_statement(&stmt);
             return status;
         }
 
-        status = execute_statement(options.db_dir, &stmt, &result, errbuf, sizeof(errbuf));
+        status = execute_statement(&ctx, &stmt, &result, errbuf, sizeof(errbuf));
         if (status != STATUS_OK) {
             print_error_message(errbuf);
+            free_execution_context(&ctx);
             free(sql_text);
             free_token_array(&tokens);
             free_statement(&stmt);
@@ -96,6 +108,7 @@ int main(int argc, char **argv)
     }
 
     free_token_array(&tokens);
+    free_execution_context(&ctx);
     free(sql_text);
 
     if (executed_statement_count == 0U) {

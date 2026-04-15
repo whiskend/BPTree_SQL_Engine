@@ -9,7 +9,8 @@ typedef enum {
     STATUS_PARSE_ERROR = 4,
     STATUS_SCHEMA_ERROR = 5,
     STATUS_STORAGE_ERROR = 6,
-    STATUS_EXEC_ERROR = 7
+    STATUS_EXEC_ERROR = 7,
+    STATUS_INDEX_ERROR = 8
 } StatusCode;
 
 #endif

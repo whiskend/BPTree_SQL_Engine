@@ -2,6 +2,7 @@
 #define RESULT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "schema.h"
 
@@ -21,6 +22,9 @@ typedef struct {
     ExecResultType type;
     size_t affected_rows;
     QueryResult query_result;
+    int used_index;
+    int has_generated_id;
+    uint64_t generated_id;
 } ExecResult;
 
 void print_exec_result(const ExecResult *result);

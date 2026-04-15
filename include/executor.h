@@ -3,8 +3,9 @@
 
 #include "ast.h"
 #include "result.h"
+#include "runtime.h"
 
-int execute_statement(const char *db_dir, const Statement *stmt,
+int execute_statement(ExecutionContext *ctx, const Statement *stmt,
                       ExecResult *out_result,
                       char *errbuf, size_t errbuf_size);
 

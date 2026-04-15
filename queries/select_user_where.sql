@@ -1,1 +1,1 @@
-SELECT id, name FROM users WHERE foot = 350;
+SELECT id, name FROM users WHERE id = 1;
